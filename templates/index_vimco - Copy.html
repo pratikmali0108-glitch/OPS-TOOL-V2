@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VIMCO Customer - Data Processing Tool</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 2rem 0; }
+        .container-custom { max-width: 900px; margin: 0 auto; }
+        .card { border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); border: none; }
+        .card-header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 15px 15px 0 0 !important; padding: 1.5rem; }
+        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border: none; padding: 0.75rem 2rem; border-radius: 25px; }
+        .btn-primary:hover { background: linear-gradient(135deg, #764ba2 0%, #667eea 100%); }
+        .btn-secondary { border-radius: 25px; }
+        .alert { border-radius: 10px; }
+        .file-list { max-height: 200px; overflow-y: auto; background: #f8f9fa; padding: 1rem; border-radius: 8px; margin-top: 1rem; }
+        .file-item { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; margin: 0.25rem 0; background: white; border-radius: 5px; }
+        .back-link { color: white; text-decoration: none; margin-bottom: 1rem; display: inline-block; }
+        .back-link:hover { color: #f0f0f0; text-decoration: underline; }
+        .download-link { color: #667eea; text-decoration: none; font-weight: bold; }
+        .download-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container container-custom">
+        <a href="{{ url_for('index') }}" class="back-link">← Back to Customer Selection</a>
+        <div class="card">
+            <div class="card-header text-center">
+                <h2 class="mb-0">🔧 VIMCO Customer Data Processing</h2>
+                <p class="mb-0 mt-2">Upload file(s) and provide parameters</p>
+            </div>
+            <div class="card-body p-4">
+                {% if error %}
+                <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                    <strong>Error:</strong> {{ error }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+                {% endif %}
+
+                {% if success %}
+                <div class="alert alert-success alert-dismissible fade show" role="alert">
+                    <strong>Success:</strong> {{ success }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+                {% endif %}
+
+                {% if download_urls %}
+                <div class="alert alert-info">
+                    <h5>Processed Files - Ready for Download:</h5>
+                    <ul class="list-unstyled mt-3">
+                        {% for url_info in download_urls %}
+                        <li class="mb-2">
+                            <a href="{{ url_info.url }}" class="download-link" download>📥 {{ url_info.filename }}</a>
+                            <span class="text-muted">({{ url_info.rows }} rows)</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% elif download_url %}
+                <div class="alert alert-info">
+                    <h5>Processed File - Ready for Download:</h5>
+                    <a href="{{ download_url }}" class="download-link" download>📥 Click here to download</a>
+                </div>
+                {% endif %}
+
+                <form action="{{ url_for('process_vimco') }}" method="POST" enctype="multipart/form-data" id="uploadForm">
+                    <div class="mb-4">
+                        <label for="files" class="form-label">Select Excel File(s)</label>
+                        <input type="file" class="form-control" id="files" name="files" accept=".xlsx,.xls" multiple required>
+                    </div>
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-4">
+                            <label class="form-label">ItemPoNo</label>
+                            <input type="text" class="form-control" name="item_po_no" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">OrderGroup</label>
+                            <input type="text" class="form-control" name="order_group" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Priority</label>
+                            <input type="text" class="form-control" name="priority" placeholder="e.g., 5 day" required>
+                        </div>
+                    </div>
+                    <div class="mb-4">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="processSeparately" name="separate" value="true" checked>
+                            <label class="form-check-label" for="processSeparately">Process files separately</label>
+                        </div>
+                        <small class="form-text text-muted">Uncheck to combine into a single output file</small>
+                    </div>
+                    <div id="fileList" class="file-list" style="display: none;">
+                        <strong>Selected Files:</strong>
+                        <div id="fileItems"></div>
+                    </div>
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
+                        <button type="button" class="btn btn-secondary me-md-2" onclick="resetForm()">Clear</button>
+                        <button type="submit" class="btn btn-primary" id="submitBtn">
+                            <span id="submitText">Process Files</span>
+                            <span id="submitSpinner" class="spinner-border spinner-border-sm ms-2" style="display: none;"></span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const fileInput = document.getElementById('files');
+        const fileList = document.getElementById('fileList');
+        const fileItems = document.getElementById('fileItems');
+        const uploadForm = document.getElementById('uploadForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const submitText = document.getElementById('submitText');
+        const submitSpinner = document.getElementById('submitSpinner');
+        fileInput.addEventListener('change', updateFileList);
+        function updateFileList() {
+            const files = fileInput.files;
+            if (files.length > 0) {
+                fileList.style.display = 'block';
+                fileItems.innerHTML = '';
+                Array.from(files).forEach((file, index) => {
+                    const fileItem = document.createElement('div');
+                    fileItem.className = 'file-item';
+                    fileItem.innerHTML = `<span>${index + 1}. ${file.name} (${(file.size / 1024).toFixed(2)} KB)</span>`;
+                    fileItems.appendChild(fileItem);
+                });
+            } else {
+                fileList.style.display = 'none';
+            }
+        }
+        function resetForm() {
+            uploadForm.reset();
+            fileList.style.display = 'none';
+            fileItems.innerHTML = '';
+        }
+        uploadForm.addEventListener('submit', function() {
+            submitText.textContent = 'Processing...';
+            submitSpinner.style.display = 'inline-block';
+            submitBtn.disabled = true;
+        });
+    </script>
+</body>
+</html>
+
+

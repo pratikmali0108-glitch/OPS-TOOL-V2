@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SKU Extractor</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px 60px;
+    }
+
+    h1 { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.5px; color: #f8fafc; margin-bottom: 4px; }
+    .subtitle { color: #94a3b8; font-size: 0.92rem; margin-bottom: 36px; }
+
+    /* ── drop zone ── */
+    #drop-zone {
+      width: 100%; max-width: 680px;
+      border: 2px dashed #334155; border-radius: 16px;
+      background: #1e2535; padding: 48px 32px;
+      text-align: center; cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    #drop-zone.drag-over  { border-color: #6366f1; background: #1e2541; }
+    #drop-zone.uploading  { border-color: #f59e0b; }
+    #drop-zone svg  { margin-bottom: 14px; opacity: 0.6; }
+    #drop-zone p    { color: #94a3b8; font-size: 0.95rem; line-height: 1.6; }
+    #drop-zone strong { color: #e2e8f0; }
+
+    #file-input, #folder-input { display: none; }
+
+    .btn-row { display: flex; gap: 12px; justify-content: center; margin-top: 20px; flex-wrap: wrap; }
+    button {
+      border: none; border-radius: 8px; padding: 10px 22px;
+      font-size: 0.88rem; font-weight: 600; cursor: pointer;
+      transition: filter 0.15s, transform 0.1s;
+    }
+    button:active { transform: scale(0.97); }
+    .btn-primary   { background: #6366f1; color: #fff; }
+    .btn-secondary { background: #334155; color: #e2e8f0; }
+    .btn-success   { background: #10b981; color: #fff; }
+    .btn-danger    { background: #ef4444; color: #fff; }
+    button:hover   { filter: brightness(1.12); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+
+    /* ── upload progress ── */
+    #progress-wrap {
+      width: 100%; max-width: 680px; margin-top: 16px;
+      display: none;
+    }
+    #progress-bar-bg {
+      background: #1e2535; border-radius: 999px; height: 6px; overflow: hidden;
+    }
+    #progress-bar {
+      height: 100%; width: 0%; background: #6366f1;
+      transition: width 0.3s ease; border-radius: 999px;
+    }
+    #progress-label { font-size: 0.78rem; color: #64748b; margin-top: 6px; text-align: center; }
+
+    /* ── status log ── */
+    #log-box {
+      width: 100%; max-width: 680px; margin-top: 20px;
+      background: #1a1f2e; border: 1px solid #1e293b; border-radius: 12px;
+      padding: 14px 16px; font-size: 0.81rem; font-family: 'Consolas', monospace;
+      max-height: 180px; overflow-y: auto; display: none;
+    }
+    .log-ok   { color: #34d399; }
+    .log-warn { color: #fbbf24; }
+    .log-info { color: #60a5fa; }
+
+    /* ── results ── */
+    #results-section { width: 100%; max-width: 900px; margin-top: 36px; display: none; }
+    .results-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .results-header h2 { font-size: 1.1rem; font-weight: 600; color: #f1f5f9; }
+    .badge {
+      background: #6366f1; color: #fff; font-size: 0.75rem; font-weight: 700;
+      padding: 3px 10px; border-radius: 999px; margin-left: 10px;
+    }
+
+    .filter-bar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+    .filter-bar input, .filter-bar select {
+      background: #1e2535; border: 1px solid #334155; border-radius: 8px;
+      color: #e2e8f0; padding: 8px 12px; font-size: 0.85rem; outline: none;
+      transition: border-color 0.15s;
+    }
+    .filter-bar input:focus, .filter-bar select:focus { border-color: #6366f1; }
+    .filter-bar input { flex: 1; min-width: 160px; }
+
+    .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1e293b; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+    thead tr { background: #1a2236; }
+    th {
+      padding: 12px 16px; text-align: left; font-weight: 600; color: #94a3b8;
+      font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.6px;
+      user-select: none; cursor: pointer; white-space: nowrap;
+    }
+    th:hover { color: #e2e8f0; }
+    th.sorted-asc::after  { content: ' ▲'; font-size: 0.65rem; }
+    th.sorted-desc::after { content: ' ▼'; font-size: 0.65rem; }
+
+    tbody tr { border-top: 1px solid #1e293b; transition: background 0.1s; }
+    tbody tr:hover { background: #1e2535; }
+    td { padding: 11px 16px; color: #cbd5e1; }
+    td.sku-cell    { font-family: 'Consolas', monospace; color: #a5b4fc; font-weight: 600; letter-spacing: 0.3px; }
+    td.folder-cell { font-weight: 600; color: #38bdf8; }
+    td:first-child, th:first-child { color: #475569; font-size: 0.78rem; }
+
+    .no-results { text-align: center; padding: 40px; color: #475569; font-size: 0.9rem; }
+
+    /* ── separate-files toggle ── */
+    #sep-label {
+      display: flex; align-items: flex-start; gap: 12px;
+      background: #1a2236; border: 1px solid #1e293b; border-radius: 12px;
+      padding: 14px 18px; margin-bottom: 16px; cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    #sep-label:hover { border-color: #334155; }
+    #sep-label input[type="checkbox"] { display: none; }
+    .sep-box {
+      flex-shrink: 0; margin-top: 2px;
+      width: 18px; height: 18px; border-radius: 5px;
+      border: 2px solid #334155; background: #0f1117;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    #sep-label input:checked + .sep-box {
+      background: #6366f1; border-color: #6366f1;
+    }
+    #sep-label input:checked + .sep-box::after {
+      content: ''; display: block;
+      width: 5px; height: 9px;
+      border: 2px solid #fff; border-top: none; border-left: none;
+      transform: rotate(45deg) translate(-1px, -1px);
+    }
+    .sep-text { font-size: 0.88rem; line-height: 1.5; color: #cbd5e1; }
+    .sep-text strong { display: block; color: #f1f5f9; margin-bottom: 2px; }
+    .sep-text small { color: #64748b; font-size: 0.8rem; }
+    .sep-text code  { color: #a5b4fc; font-family: 'Consolas', monospace; font-size: 0.82rem; }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block; width: 13px; height: 13px;
+      border: 2px solid #334155; border-top-color: #6366f1;
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+      vertical-align: middle; margin-right: 5px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>SKU Extractor</h1>
+<p class="subtitle">Upload CSV or XLS files — Python extracts SKUs server-side</p>
+
+<!-- ── drop zone ── -->
+<div id="drop-zone">
+  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="1.5">
+    <path d="M12 16V4m0 0-3 3m3-3 3 3" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M20 21H4a1 1 0 0 1-1-1v-5" stroke-linecap="round"/>
+    <path d="M20 21a1 1 0 0 0 1-1v-5" stroke-linecap="round"/>
+  </svg>
+  <p><strong>Drop files or a folder here</strong><br>or use the buttons below</p>
+
+  <div class="btn-row">
+    <button class="btn-primary"   onclick="document.getElementById('file-input').click()">Choose Files</button>
+    <button class="btn-secondary" onclick="document.getElementById('folder-input').click()">Choose Folder</button>
+    <button class="btn-danger" id="clear-btn" onclick="clearAll()" disabled>Clear</button>
+  </div>
+
+  <input type="file"   id="file-input"   multiple accept=".csv,.xls,.xlsx,.xlsm" />
+  <input type="file"   id="folder-input" webkitdirectory multiple />
+</div>
+
+<!-- ── upload progress ── -->
+<div id="progress-wrap">
+  <div id="progress-bar-bg"><div id="progress-bar"></div></div>
+  <div id="progress-label">Uploading…</div>
+</div>
+
+<!-- ── log ── -->
+<div id="log-box"></div>
+
+<!-- ── results ── -->
+<div id="results-section">
+  <div class="results-header">
+    <div><h2>Extracted SKUs <span class="badge" id="count-badge">0</span></h2></div>
+    <button class="btn-success" onclick="downloadCSV()">⬇ Download</button>
+  </div>
+
+  <!-- separate-files toggle -->
+  <label id="sep-label">
+    <input type="checkbox" id="separate-files" />
+    <span class="sep-box"></span>
+    <span class="sep-text">
+      <strong>Process files separately</strong>
+      <small>Each source file gets its own output CSV (downloaded as a ZIP).<br>
+             If unchecked, all files are combined into a single <code>sku_output.csv</code>.</small>
+    </span>
+  </label>
+
+  <div class="filter-bar">
+    <input  type="text"   id="search-input"  placeholder="Search SKU / file / folder…" oninput="renderTable()" />
+    <select id="folder-filter" onchange="renderTable()"><option value="">All folders</option></select>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th onclick="sortBy('folder')" id="th-folder">Folder</th>
+          <th onclick="sortBy('file')"   id="th-file">File</th>
+          <th onclick="sortBy('sku')"    id="th-sku">SKU</th>
+        </tr>
+      </thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+/* =================================================================
+   State
+================================================================= */
+let allRows = [];
+let sortKey = 'folder';
+let sortDir = 1;
+
+/* =================================================================
+   Drag & drop + file inputs
+================================================================= */
+const zone = document.getElementById('drop-zone');
+
+zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
+zone.addEventListener('dragleave', ()  => zone.classList.remove('drag-over'));
+zone.addEventListener('drop', e => {
+  e.preventDefault();
+  zone.classList.remove('drag-over');
+  collectFromItems(e.dataTransfer.items).then(handleFiles);
+});
+
+document.getElementById('file-input').addEventListener('change',   e => handleFiles([...e.target.files]));
+document.getElementById('folder-input').addEventListener('change', e => handleFiles([...e.target.files]));
+
+async function collectFromItems(items) {
+  const files = [];
+  await Promise.all([...items].map(item => {
+    if (item.kind !== 'file') return;
+    const entry = item.webkitGetAsEntry?.();
+    if (entry?.isDirectory) return walkDir(entry, files);
+    const f = item.getAsFile();
+    if (f) files.push(f);
+  }));
+  return files;
+}
+
+function walkDir(dir, out) {
+  return new Promise(resolve => {
+    const reader = dir.createReader();
+    const go = () => reader.readEntries(async entries => {
+      if (!entries.length) return resolve();
+      await Promise.all(entries.map(e =>
+        e.isFile ? new Promise(r => e.file(f => { out.push(f); r(); }))
+                 : walkDir(e, out)
+      ));
+      go();
+    });
+    go();
+  });
+}
+
+/* =================================================================
+   Main upload → server
+================================================================= */
+async function handleFiles(files) {
+  const supported = files.filter(f => /\.(csv|xls|xlsx|xlsm)$/i.test(f.name));
+  if (!supported.length) { alert('No supported files found (.csv / .xls / .xlsx).'); return; }
+
+  setUploading(true);
+  showLog();
+  log(`Sending ${supported.length} file(s) to server…`, 'info');
+
+  const form = new FormData();
+  supported.forEach(f => {
+    form.append('files', f);
+    form.append('paths', f.webkitRelativePath || f.name);
+  });
+
+  try {
+    const xhr = new XMLHttpRequest();
+
+    // upload progress bar
+    xhr.upload.addEventListener('progress', e => {
+      if (e.lengthComputable) {
+        const pct = Math.round(e.loaded / e.total * 100);
+        document.getElementById('progress-bar').style.width = pct + '%';
+        document.getElementById('progress-label').textContent = `Uploading… ${pct}%`;
+      }
+    });
+
+    const result = await new Promise((resolve, reject) => {
+      xhr.open('POST', '/extract');
+      xhr.onload = () => {
+        if (xhr.status === 200) resolve(JSON.parse(xhr.responseText));
+        else reject(new Error(`Server error ${xhr.status}: ${xhr.responseText}`));
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.send(form);
+    });
+
+    result.logs.forEach(l => log(l.msg, l.type));
+    allRows.push(...result.rows);
+    updateFolderFilter();
+    renderTable();
+    document.getElementById('results-section').style.display = 'block';
+    document.getElementById('clear-btn').disabled = false;
+
+  } catch (err) {
+    log(`⚠ ${err.message}`, 'warn');
+  } finally {
+    setUploading(false);
+    // reset file inputs so same files can be re-uploaded
+    document.getElementById('file-input').value   = '';
+    document.getElementById('folder-input').value = '';
+  }
+}
+
+function setUploading(on) {
+  zone.classList.toggle('uploading', on);
+  document.getElementById('progress-wrap').style.display = on ? 'block' : 'none';
+  if (!on) {
+    document.getElementById('progress-bar').style.width = '0%';
+    document.getElementById('progress-label').textContent = 'Uploading…';
+  }
+}
+
+/* =================================================================
+   Table rendering
+================================================================= */
+function renderTable() {
+  const search  = document.getElementById('search-input').value.toLowerCase();
+  const folderF = document.getElementById('folder-filter').value;
+
+  let data = allRows.filter(r => {
+    if (folderF && r.folder !== folderF) return false;
+    if (search && !`${r.folder} ${r.file} ${r.sku}`.toLowerCase().includes(search)) return false;
+    return true;
+  });
+
+  data.sort((a, b) =>
+    (a[sortKey] || '').localeCompare(b[sortKey] || '', undefined, { numeric: true }) * sortDir
+  );
+
+  document.getElementById('count-badge').textContent = data.length;
+  const tbody = document.getElementById('table-body');
+
+  if (!data.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="no-results">No matching SKUs found</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = data.map((r, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td class="folder-cell">${esc(r.folder)}</td>
+      <td>${esc(r.file)}</td>
+      <td class="sku-cell">${esc(r.sku)}</td>
+    </tr>`).join('');
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function sortBy(key) {
+  sortDir = sortKey === key ? sortDir * -1 : 1;
+  sortKey = key;
+  document.querySelectorAll('th').forEach(th => th.classList.remove('sorted-asc','sorted-desc'));
+  const th = document.getElementById(`th-${key}`);
+  if (th) th.classList.add(sortDir === 1 ? 'sorted-asc' : 'sorted-desc');
+  renderTable();
+}
+
+/* =================================================================
+   Folder filter dropdown
+================================================================= */
+function updateFolderFilter() {
+  const sel     = document.getElementById('folder-filter');
+  const current = sel.value;
+  const folders = [...new Set(allRows.map(r => r.folder))].sort();
+  sel.innerHTML = '<option value="">All folders</option>' +
+    folders.map(f => `<option value="${esc(f)}"${f===current?' selected':''}>${esc(f)}</option>`).join('');
+}
+
+/* =================================================================
+   Download  (combined CSV  OR  per-file ZIP)
+================================================================= */
+const csvQ = s => /[,"\r\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+
+function getFilteredData() {
+  const search  = document.getElementById('search-input').value.toLowerCase();
+  const folderF = document.getElementById('folder-filter').value;
+  return allRows.filter(r => {
+    if (folderF && r.folder !== folderF) return false;
+    if (search && !`${r.folder} ${r.file} ${r.sku}`.toLowerCase().includes(search)) return false;
+    return true;
+  });
+}
+
+function triggerBlobDownload(blob, filename) {
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(blob),
+    download: filename
+  });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
+function buildCSV(rows) {
+  return ['file,sku', ...rows.map(r => `${csvQ(r.file)},${csvQ(r.sku)}`)].join('\r\n');
+}
+
+/* JSZip loaded on demand */
+let jsZipReady = false;
+async function ensureJSZip() {
+  if (jsZipReady || window.JSZip) { jsZipReady = true; return; }
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
+  jsZipReady = true;
+}
+
+async function downloadCSV() {
+  const data     = getFilteredData();
+  const separate = document.getElementById('separate-files').checked;
+
+  if (!separate) {
+    /* ── combined: single sku_output.csv with file + sku columns ── */
+    triggerBlobDownload(
+      new Blob([buildCSV(data)], { type: 'text/csv' }),
+      'sku_output.csv'
+    );
+    return;
+  }
+
+  /* ── separate: one CSV per source file, bundled into a ZIP ── */
+  try {
+    await ensureJSZip();
+  } catch {
+    alert('Could not load ZIP library. Check your internet connection and try again.');
+    return;
+  }
+
+  const zip = new JSZip();
+
+  /* group by original file name */
+  const groups = {};
+  data.forEach(r => { (groups[r.file] = groups[r.file] || []).push(r); });
+
+  for (const [fname, rows] of Object.entries(groups)) {
+    const base    = fname.replace(/\.[^.]+$/, '');   // strip extension
+    const outName = base + '_sku.csv';
+    zip.file(outName, buildCSV(rows));
+  }
+
+  const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+  triggerBlobDownload(blob, 'sku_output_separate.zip');
+}
+
+/* =================================================================
+   Log helper
+================================================================= */
+function showLog() { document.getElementById('log-box').style.display = 'block'; }
+function log(msg, type = 'info') {
+  const box = document.getElementById('log-box');
+  const div = Object.assign(document.createElement('div'), { className: `log-${type}`, textContent: msg });
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+/* =================================================================
+   Clear
+================================================================= */
+function clearAll() {
+  allRows = [];
+  document.getElementById('log-box').innerHTML       = '';
+  document.getElementById('log-box').style.display   = 'none';
+  document.getElementById('results-section').style.display = 'none';
+  document.getElementById('search-input').value      = '';
+  document.getElementById('folder-filter').innerHTML = '<option value="">All folders</option>';
+  document.getElementById('clear-btn').disabled      = true;
+}
+</script>
+</body>
+</html>

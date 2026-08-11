@@ -1,0 +1,8 @@
+Flask
+pandas==2.2.3
+numpy==2.3.4
+openpyxl==3.1.2
+Werkzeug==2.3.7
+xlrd==2.0.2
+regex
+pdfplumber

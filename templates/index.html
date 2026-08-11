@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Order Processing Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        html, body {
+            overscroll-behavior: none;
+        }
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', sans-serif;
+            padding: 2rem 0 4rem;
+        }
+        .dashboard-title {
+            color: #fff;
+            font-size: 2rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+        .dashboard-sub {
+            color: rgba(255,255,255,0.8);
+            font-size: 1rem;
+        }
+
+        /* --- Reset dashboard icon --- */
+        .diamond-reset-btn {
+            border: none;
+            background: transparent;
+            padding: 0;
+            margin-right: 0.55rem;
+            color: #fff;
+            cursor: pointer;
+            font-size: 2rem;
+            line-height: 1;
+        }
+        .diamond-reset-btn:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(255,255,255,0.25);
+            border-radius: 8px;
+        }
+
+        /* --- Summary Stat Cards --- */
+        .stat-card {
+            background: rgba(255,255,255,0.15);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 16px;
+            padding: 1.4rem 1.6rem;
+            color: #fff;
+            height: 100%;
+        }
+        .stat-card .stat-label {
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            opacity: 0.85;
+            margin-bottom: 0.35rem;
+        }
+        .stat-card .stat-value {
+            font-size: 2.2rem;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .stat-card .stat-detail {
+            font-size: 0.82rem;
+            opacity: 0.75;
+            margin-top: 0.3rem;
+        }
+        .stat-icon {
+            font-size: 1.8rem;
+            opacity: 0.9;
+            float: right;
+            margin-top: -0.2rem;
+        }
+
+        /* --- Main Panel --- */
+        .main-panel {
+            background: #fff;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        .panel-header {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            padding: 1.4rem 2rem;
+            color: #fff;
+        }
+        .panel-header h5 {
+            margin: 0;
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+        .panel-body {
+            padding: 2rem;
+        }
+
+        /* --- Dropdown Selector --- */
+        .selector-wrap {
+            background: #f8f7ff;
+            border-radius: 14px;
+            padding: 1.8rem 2rem;
+            border: 2px solid #e8e4ff;
+        }
+        .selector-label {
+            font-weight: 600;
+            color: #4a4a6a;
+            font-size: 0.95rem;
+            margin-bottom: 0.6rem;
+        }
+        .customer-select {
+            border: 2px solid #d0c9ff;
+            border-radius: 10px;
+            padding: 0.7rem 1rem;
+            font-size: 1rem;
+            color: #333;
+            background: #fff;
+            width: 100%;
+            transition: border-color 0.2s;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%23764ba2' viewBox='0 0 16 16'%3E%3Cpath d='M7.247 11.14L2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 1rem center;
+            cursor: pointer;
+        }
+        .customer-select:focus {
+            outline: none;
+            border-color: #764ba2;
+            box-shadow: 0 0 0 3px rgba(118,75,162,0.15);
+        }
+        .go-btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border: none;
+            border-radius: 10px;
+            color: #fff;
+            font-weight: 600;
+            font-size: 1rem;
+            padding: 0.72rem 2rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: opacity 0.2s;
+        }
+        .go-btn:hover { opacity: 0.9; }
+        .go-btn:active { opacity: 1; }
+
+        /* --- Stats Table --- */
+        .stats-table th {
+            background: #f3f0ff;
+            color: #5a4a8a;
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+            border-bottom: 2px solid #e0d9ff;
+        }
+        .stats-table td {
+            vertical-align: middle;
+            font-size: 0.93rem;
+            color: #444;
+            border-bottom: 1px solid #f0eeff;
+        }
+        .stats-table tbody tr:hover { background: #faf8ff; }
+        .badge-orders {
+            background: #ede9ff;
+            color: #6b4fbb;
+            border-radius: 20px;
+            padding: 0.25rem 0.75rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        .badge-files {
+            background: #e8f4ff;
+            color: #3b82c4;
+            border-radius: 20px;
+            padding: 0.25rem 0.75rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        .rank-badge {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+        .rank-1 { background: #ffd700; color: #7a5c00; }
+        .rank-2 { background: #c0c0c0; color: #444; }
+        .rank-3 { background: #cd7f32; color: #fff; }
+        .rank-other { background: #f0eeff; color: #888; }
+        .progress-bar-custom {
+            height: 6px;
+            border-radius: 3px;
+            background: #ede9ff;
+            margin-top: 4px;
+        }
+        .progress-fill {
+            height: 100%;
+            border-radius: 3px;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+        }
+        .no-data-msg {
+            color: #999;
+            text-align: center;
+            padding: 2rem;
+            font-size: 0.95rem;
+        }
+        .section-title {
+            font-weight: 700;
+            font-size: 1rem;
+            color: #4a3a7a;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .divider {
+            border: none;
+            border-top: 2px solid #f0eeff;
+            margin: 1.8rem 0;
+        }
+        .chart-wrap {
+            position: relative;
+            height: 260px;
+        }
+        .last-processed-badge {
+            font-size: 0.75rem;
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-lg">
+
+        <!-- Header -->
+        <div class="row justify-content-center mb-4">
+            <div class="col-lg-10 text-center">
+                <div class="dashboard-title mb-1">
+                    <button
+                        type="button"
+                        id="resetDashboardBtn"
+                        class="diamond-reset-btn"
+                        title="Reset dashboard data"
+                        aria-label="Reset dashboard data"
+                    >💎</button>
+                    Order Processing Dashboard
+                </div>
+                <div class="dashboard-sub">Track, analyse and process customer purchase orders</div>
+            </div>
+        </div>
+
+        <!-- Summary Stat Cards -->
+        <div class="row g-3 justify-content-center mb-4">
+            {% set total_orders = stats.total_orders | default(0) %}
+            {% set total_files  = stats.total_files  | default(0) %}
+            {% set customers    = stats.customers     | default({}) %}
+            {% set active_count = customers | length %}
+
+            <!-- Total Orders -->
+            <div class="col-6 col-md-3">
+                <div class="stat-card">
+                    <span class="stat-icon">📦</span>
+                    <div class="stat-label">Total Orders Processed</div>
+                    <div class="stat-value">{{ total_orders | int }}</div>
+                    <div class="stat-detail">order lines across all customers</div>
+                </div>
+            </div>
+
+            <!-- Total Files -->
+            <div class="col-6 col-md-3">
+                <div class="stat-card">
+                    <span class="stat-icon">📂</span>
+                    <div class="stat-label">Files Processed</div>
+                    <div class="stat-value">{{ total_files | int }}</div>
+                    <div class="stat-detail">PO files converted successfully</div>
+                </div>
+            </div>
+
+            <!-- Active Customers -->
+            <div class="col-6 col-md-3">
+                <div class="stat-card">
+                    <span class="stat-icon">🏷️</span>
+                    <div class="stat-label">Active Customers</div>
+                    <div class="stat-value">{{ active_count }}</div>
+                    <div class="stat-detail">out of 21 total customers</div>
+                </div>
+            </div>
+
+            <!-- Top Customer -->
+            {% if customers %}
+                {% set top_cust = namespace(name='—', orders=0) %}
+                {% for name, data in customers.items() %}
+                    {% if data.orders_processed > top_cust.orders %}
+                        {% set top_cust.name   = name %}
+                        {% set top_cust.orders = data.orders_processed %}
+                    {% endif %}
+                {% endfor %}
+                <div class="col-6 col-md-3">
+                    <div class="stat-card">
+                        <span class="stat-icon">🏆</span>
+                        <div class="stat-label">Top Customer</div>
+                        <div class="stat-value" style="font-size:1.4rem;">{{ top_cust.name }}</div>
+                        <div class="stat-detail">{{ top_cust.orders }} orders processed</div>
+                    </div>
+                </div>
+            {% else %}
+                <div class="col-6 col-md-3">
+                    <div class="stat-card">
+                        <span class="stat-icon">🏆</span>
+                        <div class="stat-label">Top Customer</div>
+                        <div class="stat-value" style="font-size:1.4rem;">—</div>
+                        <div class="stat-detail">no data yet</div>
+                    </div>
+                </div>
+            {% endif %}
+        </div>
+
+        <!-- Main Panel -->
+        <div class="row justify-content-center">
+            <div class="col-lg-10">
+                <div class="main-panel">
+
+                    <!-- Customer Selector -->
+                    <div class="panel-header">
+                        <h5>🚀 Select a Customer to Process Orders</h5>
+                    </div>
+                    <div class="panel-body">
+                        <div class="selector-wrap mb-0">
+                            <div class="selector-label">Choose Customer</div>
+                            <div class="d-flex gap-3 align-items-center flex-wrap">
+                                <select class="customer-select flex-grow-1" id="customerSelect">
+                                    <option value="" disabled selected>— Select a customer —</option>
+                                    <option value="{{ url_for('omj_tool') }}">💎 OMJ</option>
+                                    <option value="{{ url_for('shefi_tool') }}">✨ SHEFI</option>
+                                    <option value="{{ url_for('shefi_new_tool') }}">📄 SHEFI New PO (PDF)</option>
+                                    <option value="{{ url_for('ambition_tool') }}">🚀 Ambition/Aneri</option>
+                                    <option value="{{ url_for('craft_tool') }}">🛠️ Craft</option>
+                                    <option value="{{ url_for('fsa_tool') }}">📄 FSA</option>
+                                    <option value="{{ url_for('jjl_tool') }}">💼 JJL</option>
+                                    <option value="{{ url_for('obu_tool') }}">🏷️ OBU</option>
+                                    <option value="{{ url_for('rbl_tool') }}">🏦 RBL</option>
+                                    <option value="{{ url_for('anaya_tool') }}">📊 Anaya</option>
+                                    <option value="{{ url_for('hk_tool') }}">🇭🇰 HK</option>
+                                    <option value="{{ url_for('uneek_tool') }}">💎 UNEEK</option>
+                                    <option value="{{ url_for('ju_tool') }}"->📿 JU (Pendant)</option>
+                                    <option value="{{ url_for('sku_extractor_tool') }}">📋 SKU Extractor</option>
+                                    <option value="{{ url_for('aam_tool') }}">💼 AAM (Aurum Adams)</option>
+                                    <option value="{{ url_for('bhakti_dharam_tool') }}">🛕 Bhakti &amp; Dharam</option>
+                                    <option value="{{ url_for('dct_tool') }}">📋 DCT</option>
+                                    <option value="{{ url_for('mor_tool') }}">🏺 MOR</option>
+                                    <option value="{{ url_for('ngl_tool') }}">💍 NGL</option>
+                                    <option value="{{ url_for('pc2_tool') }}">🇮🇹 PC2 (Damiani)</option>
+                                    <option value="{{ url_for('pcb_tool') }}">📦 PCB (Pushpam)</option>
+                                    <option value="{{ url_for('sgi_tool') }}">🏢 SGI</option>
+                                    <option value="{{ url_for('vimco_tool') }}">🔧 VIMCO</option>
+                                </select>
+                                <button class="go-btn" onclick="goToCustomer()">Go →</button>
+                            </div>
+                        </div>
+
+                        <hr class="divider">
+
+                        <!-- Analytics Section -->
+                        {% if customers %}
+
+                            <!-- Chart -->
+                            <div class="section-title">📊 Orders by Customer</div>
+                            <div class="chart-wrap mb-4">
+                                <canvas id="ordersChart"></canvas>
+                            </div>
+
+                            <hr class="divider">
+
+                            <!-- Table -->
+                            <div class="section-title">📋 Customer-wise Breakdown</div>
+                            <div class="table-responsive">
+                                <table class="table stats-table mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th style="width:48px;">#</th>
+                                            <th>Customer</th>
+                                            <th class="text-center">Orders Processed</th>
+                                            <th class="text-center">Files Processed</th>
+                                            <th class="text-end">Share</th>
+                                            <th class="text-end">Last Processed</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% set sorted_customers = customers.items() | sort(attribute='1.orders_processed', reverse=True) %}
+                                        {% for name, data in sorted_customers %}
+                                            {% set rank = loop.index %}
+                                            {% set share = ((data.orders_processed / total_orders * 100) | round(1)) if total_orders > 0 else 0 %}
+                                            <tr>
+                                                <td>
+                                                    {% if rank == 1 %}
+                                                        <span class="rank-badge rank-1">1</span>
+                                                    {% elif rank == 2 %}
+                                                        <span class="rank-badge rank-2">2</span>
+                                                    {% elif rank == 3 %}
+                                                        <span class="rank-badge rank-3">3</span>
+                                                    {% else %}
+                                                        <span class="rank-badge rank-other">{{ rank }}</span>
+                                                    {% endif %}
+                                                </td>
+                                                <td><strong>{{ name }}</strong></td>
+                                                <td class="text-center">
+                                                    <span class="badge-orders">{{ data.orders_processed }}</span>
+                                                    <div class="progress-bar-custom mt-1">
+                                                        <div class="progress-fill" style="width: {{ share }}%"></div>
+                                                    </div>
+                                                </td>
+                                                <td class="text-center">
+                                                    <span class="badge-files">{{ data.files_processed }}</span>
+                                                </td>
+                                                <td class="text-end" style="color:#888; font-size:0.88rem;">{{ share }}%</td>
+                                                <td class="text-end last-processed-badge">
+                                                    {{ data.last_processed or '—' }}
+                                                </td>
+                                            </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                        {% else %}
+                            <div class="no-data-msg">
+                                <div style="font-size:2.5rem; margin-bottom:0.5rem;">📭</div>
+                                <strong>No orders processed yet.</strong><br>
+                                Select a customer above and start processing PO files — stats will appear here automatically.
+                            </div>
+                        {% endif %}
+
+                    </div><!-- /panel-body -->
+                </div><!-- /main-panel -->
+            </div>
+        </div>
+
+    </div><!-- /container -->
+
+    <script>
+        function goToCustomer() {
+            const sel = document.getElementById('customerSelect');
+            if (sel.value) {
+                window.location.href = sel.value;
+            } else {
+                sel.style.borderColor = '#e74c3c';
+                sel.style.boxShadow = '0 0 0 3px rgba(231,76,60,0.2)';
+                setTimeout(() => {
+                    sel.style.borderColor = '';
+                    sel.style.boxShadow = '';
+                }, 1500);
+            }
+        }
+
+        document.getElementById('customerSelect').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') goToCustomer();
+        });
+
+        // Reset dashboard stats when header diamond is clicked.
+        const resetBtn = document.getElementById('resetDashboardBtn');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', async () => {
+                const ok = window.confirm('Reset dashboard data? This will clear all saved order statistics.');
+                if (!ok) return;
+                try {
+                    await fetch('{{ url_for("reset_dashboard") }}', { method: 'POST' });
+                } catch (e) {
+                    // Ignore network errors; still reload to force UI to reflect cleared state (if server reset succeeded).
+                } finally {
+                    window.location.href = '{{ url_for("index") }}';
+                }
+            });
+        }
+
+        {% if customers %}
+        // Build chart data (sorted by orders desc)
+        const chartData = [
+            {% set sorted_for_chart = customers.items() | sort(attribute='1.orders_processed', reverse=True) %}
+            {% for name, data in sorted_for_chart %}
+            { label: "{{ name }}", value: {{ data.orders_processed }} }{% if not loop.last %},{% endif %}
+            {% endfor %}
+        ];
+
+        const palette = [
+            '#667eea','#764ba2','#f093fb','#4facfe','#43e97b',
+            '#fa709a','#fee140','#30cfd0','#a18cd1','#fda085',
+            '#f5576c','#4481eb','#0ba360','#3cba92','#9795f0',
+            '#fbc2eb','#a1c4fd','#fddb92','#d1fdff','#96fbc4'
+        ];
+
+        new Chart(document.getElementById('ordersChart'), {
+            type: 'bar',
+            data: {
+                labels: chartData.map(d => d.label),
+                datasets: [{
+                    label: 'Orders Processed',
+                    data: chartData.map(d => d.value),
+                    backgroundColor: chartData.map((_, i) => palette[i % palette.length]),
+                    borderRadius: 8,
+                    borderSkipped: false,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: ctx => ` ${ctx.parsed.y} orders`
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: { display: false },
+                        ticks: { font: { size: 11 }, color: '#555' }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: '#f0eeff' },
+                        ticks: {
+                            font: { size: 11 },
+                            color: '#888',
+                            precision: 0
+                        }
+                    }
+                }
+            }
+        });
+        {% endif %}
+    </script>
+</body>
+</html>
