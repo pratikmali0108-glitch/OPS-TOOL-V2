@@ -7,9 +7,9 @@
       "ip_address": "192.168.180.82"
     },
     "Bhakti Diamond LLC": {
-      "files_processed": 79,
-      "orders_processed": 223,
-      "last_processed": "2026-08-12 16:25"
+      "files_processed": 80,
+      "orders_processed": 224,
+      "last_processed": "2026-08-12 17:27"
     },
     "Ambition": {
       "files_processed": 78,
@@ -22,9 +22,9 @@
       "last_processed": "2026-08-05 16:31"
     },
     "OBU": {
-      "files_processed": 21,
-      "orders_processed": 45,
-      "last_processed": "2026-08-11 13:40"
+      "files_processed": 34,
+      "orders_processed": 115,
+      "last_processed": "2026-08-12 17:51"
     },
     "Craft": {
       "files_processed": 65,
@@ -57,7 +57,7 @@
       "last_processed": "2026-08-11 11:27"
     }
   },
-  "total_files": 616,
-  "total_orders": 4998,
+  "total_files": 630,
+  "total_orders": 5069,
   "last_breakdown_logged_date": "2026-08-12"
 }

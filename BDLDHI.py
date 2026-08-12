@@ -1225,7 +1225,7 @@ def write_output_excel(output_rows, output_path, template_path=None):
                     if col_name in row_data:
                         ws.cell(row=row_idx, column=col_idx, value=row_data[col_name])
 
-            wb.save(output_path)
+            #wb.save(output_path)
             return
         except Exception:
             pass
