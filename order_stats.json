@@ -7,14 +7,14 @@
       "ip_address": "192.168.180.82"
     },
     "Bhakti Diamond LLC": {
-      "files_processed": 43,
-      "orders_processed": 124,
-      "last_processed": "2026-08-11 10:04"
+      "files_processed": 79,
+      "orders_processed": 223,
+      "last_processed": "2026-08-12 16:25"
     },
     "Ambition": {
-      "files_processed": 70,
-      "orders_processed": 173,
-      "last_processed": "2026-08-11 10:11"
+      "files_processed": 78,
+      "orders_processed": 183,
+      "last_processed": "2026-08-12 12:21"
     },
     "VIMCO": {
       "files_processed": 32,
@@ -57,7 +57,7 @@
       "last_processed": "2026-08-11 11:27"
     }
   },
-  "total_files": 572,
-  "total_orders": 4889,
-  "last_breakdown_logged_date": "2026-08-11"
+  "total_files": 616,
+  "total_orders": 4998,
+  "last_breakdown_logged_date": "2026-08-12"
 }

@@ -1,790 +1,1270 @@
-import os
 import re
+import os
 import pandas as pd
 import pdfplumber
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from openpyxl import load_workbook
 
 
-# ─────────────────────────────────────────────
-#  INTERNAL HELPERS
-# ─────────────────────────────────────────────
-
-def _find(pattern: str, text: str, default: str = "") -> str:
-    m = re.search(pattern, text)
-    return m.group(1).strip() if m else default
-
-
-_ITEMSIZE_MST_CACHE = None
-
-
-def _canon_number_key(num_str: str) -> str:
-    """
-    Canonicalize a numeric string so "07" -> "7", "5.50" -> "5.5".
-    """
-    s = (str(num_str) if num_str is not None else "").strip()
-    if not s:
-        return ""
-    s = s.replace(",", "")
-    try:
-        d = Decimal(s)
-    except InvalidOperation:
-        return ""
-    # Normalize removes trailing zeros (e.g. 5.50 -> 5.5)
-    s2 = format(d.normalize(), "f")
-    if "." in s2:
-        s2 = s2.rstrip("0").rstrip(".")
-    return s2
-
-
-def _norm_item_size_code_key(size: str) -> str:
-    """
-    Normalize a size like "7" / "07" into master key "07".
-    Supports decimal sizes too (e.g. "5.5").
-    """
-    s = (str(size) if size is not None else "").strip()
-    if not s:
-        return ""
-
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
-    if not m:
-        return ""
-    return _canon_number_key(m.group(1))
-
-
-def _load_item_size_mst() -> dict:
-    """
-    Load ItemSize master.
-
-    Master file structure (based on your current Excel):
-      - column: 'Item Size Code'
-      - values: 'IT 07', 'US07', 'UP07', 'TS 07', ...
-
-    Returns:
-      mapping[prefix][size_key] -> exact Item Size Code string from the master.
-    """
-    global _ITEMSIZE_MST_CACHE
-    if _ITEMSIZE_MST_CACHE is not None:
-        return _ITEMSIZE_MST_CACHE
-
-    mst_path = os.path.join(os.path.dirname(__file__), "ItemSize_Mst.xlsx")
-    if not os.path.exists(mst_path):
-        _ITEMSIZE_MST_CACHE = {}
-        return _ITEMSIZE_MST_CACHE
-
-    mst = pd.read_excel(mst_path, dtype=str)
-    mst.columns = [str(c).strip() for c in mst.columns]
-
-    if "Item Size Code" not in mst.columns:
-        _ITEMSIZE_MST_CACHE = {}
-        return _ITEMSIZE_MST_CACHE
-
-    out = {}
-    for raw in mst["Item Size Code"].dropna().tolist():
-        val = str(raw).strip()
-        if not val:
-            continue
-
-        # Prefix is the leading letters (e.g. "UP07", "TS 07").
-        m = re.match(r"^\s*([A-Za-z]+)", val)
-        if not m:
-            continue
-        prefix = m.group(1).upper()
-
-        # Extract the first numeric value from the master entry (e.g. UP5.5 / TS 07 / 6.30 INCH)
-        m_num = re.search(r"(\d+(?:\.\d+)?)", val)
-        if not m_num:
-            continue
-        size_key = _canon_number_key(m_num.group(1))
-        if not size_key:
-            continue
-
-        # If multiple rows collapse to the same numeric key (e.g. "UP09" and "UP 9:50" both
-        # normalize to key "9"), prefer the clean canonical two-digit/integer form.
-        def _master_value_is_preferred(v: str) -> bool:
-            u = str(v).strip().upper()
-            if ':' in u:
-                return False
-            if '.' in u:
-                return False
-            digits = re.sub(r"\D", "", u)
-            return len(digits) == 2
-
-        existing = out.get(prefix, {}).get(size_key)
-        if existing is None:
-            out.setdefault(prefix, {})[size_key] = val
-        else:
-            if _master_value_is_preferred(val) and not _master_value_is_preferred(existing):
-                out.setdefault(prefix, {})[size_key] = val
-
-    _ITEMSIZE_MST_CACHE = out
-    return out
-
-
-def _map_item_size_from_mst(size: str, prefix: str) -> str:
-    """
-    Map ItemSize using ItemSize master (Item Size Code column).
-    Falls back to the existing _build_item_size logic if not found.
-    """
-    key = _norm_item_size_code_key(size)
-    if not key:
-        return _build_item_size(size, prefix)
-
-    prefix = (prefix or "").strip().upper()
-    mst_map = _load_item_size_mst()
-    mapped = mst_map.get(prefix, {}).get(key, "")
-    return mapped if mapped else _build_item_size(size, prefix)
-
-
-_CLIENT_STYLE_DF = None
-_CS_ITEMSIZE_DATA = None
-
-# CS file path for ItemSize lookup from CS_100826 folder
-CS_ITEMSIZE_FILE_PATH = os.path.join(
+REFERENCE_EXCEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "CS_100826",
-    "BDL_CS_100826.xlsx"
+    "DHI_CS_100826.xlsx"
+)
+
+OUTPUT_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "CS_100826",
+    "DHI_CS_100826.xlsx"
 )
 
 
-def _get_client_style_df() -> pd.DataFrame:
-    """Load and cache DHI_CS.xlsx as a dataframe."""
-    global _CLIENT_STYLE_DF
-    if _CLIENT_STYLE_DF is not None:
-        return _CLIENT_STYLE_DF
-    try:
-        cs_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "CS_220526",
-            "DHI_CS.xlsx"
+TONE_MAP = {
+    "YG": {
+        "metal_kt": "Y",
+        "tone": "Y",
+        "metal_code": "G14Y",
+        "metal_name": "YELLOW GOLD"
+    },
+    "WG": {
+        "metal_kt": "W",
+        "tone": "W",
+        "metal_code": "G14W",
+        "metal_name": "WHITE GOLD"
+    },
+    "PG": {
+        "metal_kt": "P",
+        "tone": "P",
+        "metal_code": "G14P",
+        "metal_name": "PINK GOLD"
+    },
+    "PT": {
+        "metal_kt": "PT",
+        "tone": "PT",
+        "metal_code": "PT",
+        "metal_name": "PLATINUM"
+    },
+    "AL": {
+        "metal_kt": "AL",
+        "tone": "AL",
+        "metal_code": "AL",
+        "metal_name": "ALLOY"
+    },
+}
+
+
+def parse_metal_from_description(desc_text, recycled=False):
+    desc_upper = str(desc_text).upper()
+
+    metal_info = {
+        "karat": "14",
+        "tone_suffix": "YG",
+        "metal": "G14Y",
+        "tone": "Y",
+        "metal_name": "YELLOW GOLD",
+    }
+
+    # ---------------------------------------------------------
+    # Detect karat
+    # ---------------------------------------------------------
+    if re.search(r"\b18K\b", desc_upper):
+        metal_info["karat"] = "18"
+    elif re.search(r"\b10K\b", desc_upper):
+        metal_info["karat"] = "10"
+    elif re.search(r"\b22K\b", desc_upper):
+        metal_info["karat"] = "22"
+    elif re.search(r"\b14K\b", desc_upper):
+        metal_info["karat"] = "14"
+
+    # ---------------------------------------------------------
+    # Detect metal/tone
+    # IMPORTANT:
+    # PT is checked FIRST.
+    # ---------------------------------------------------------
+
+    if (
+        re.search(r"\bPLATINUM\b", desc_upper)
+        or re.search(r"\bPLAT\b", desc_upper)
+        or re.search(r"\bPT95\b", desc_upper)
+        or re.search(r"\bPT\b", desc_upper)
+    ):
+        tone_suffix = "PT"
+
+    elif (
+        re.search(r"\bWHITE\s+GOLD\b", desc_upper)
+        or re.search(r"\bWHITE\b", desc_upper)
+        or re.search(r"\b14KW\b", desc_upper)
+        or re.search(r"\b18KW\b", desc_upper)
+        or re.search(r"\b10KW\b", desc_upper)
+    ):
+        tone_suffix = "WG"
+
+    elif (
+        re.search(r"\bPINK\s+GOLD\b", desc_upper)
+        or re.search(r"\bROSE\s+GOLD\b", desc_upper)
+        or re.search(r"\bPINK\b", desc_upper)
+        or re.search(r"\bROSE\b", desc_upper)
+        or re.search(r"\b14KP\b", desc_upper)
+        or re.search(r"\b18KP\b", desc_upper)
+    ):
+        tone_suffix = "PG"
+
+    elif (
+        re.search(r"\bALLOY\b", desc_upper)
+        or re.search(r"\b14KAL\b", desc_upper)
+    ):
+        tone_suffix = "AL"
+
+    elif (
+        re.search(r"\bYELLOW\s+GOLD\b", desc_upper)
+        or re.search(r"\bYELLOW\b", desc_upper)
+        or re.search(r"\b14KY\b", desc_upper)
+        or re.search(r"\b18KY\b", desc_upper)
+        or re.search(r"\b10KY\b", desc_upper)
+    ):
+        tone_suffix = "YG"
+
+    else:
+        tone_suffix = "YG"
+
+    # ---------------------------------------------------------
+    # Build final metal information
+    # ---------------------------------------------------------
+    metal_info["tone_suffix"] = tone_suffix
+
+    t = TONE_MAP[tone_suffix]
+
+    metal_info["tone"] = t["tone"]
+    metal_info["metal_name"] = t["metal_name"]
+
+    suffix_z = "Z" if recycled else ""
+
+    if tone_suffix == "PT":
+        metal_info["metal"] = f"PC95{suffix_z}"
+
+    elif tone_suffix == "AL":
+        metal_info["metal"] = f"AL{metal_info['karat']}{suffix_z}"
+
+    else:
+        metal_info["metal"] = (
+            f"G{metal_info['karat']}{t['metal_kt']}{suffix_z}"
         )
-        _CLIENT_STYLE_DF = pd.read_excel(cs_path, dtype=str)
-        # Clean up column names
-        _CLIENT_STYLE_DF.columns = [str(c).strip() for c in _CLIENT_STYLE_DF.columns]
-    except Exception:
-        _CLIENT_STYLE_DF = pd.DataFrame()
-    return _CLIENT_STYLE_DF
+
+    return metal_info
+
+def extract_size_from_text(text):
+    size = None
+
+    patterns = [
+        r"SZ\s*([\d.]+)",
+        r"SIZE\s*([\d.]+)",
+        r"(\d+(?:\.\d+)?)\s*[-–]\s*(?:YG|WG|PG|PT|AL|YGSM|PTM|AG)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            size = float(match.group(1))
+            if size == int(size):
+                size = int(size)
+            return str(size)
+
+    return size
 
 
-def _load_cs_itemsize_data() -> pd.DataFrame:
-    """Load and cache CS_100826/BDL_CS_100826.xlsx for ItemSize lookup."""
-    global _CS_ITEMSIZE_DATA
-    if _CS_ITEMSIZE_DATA is not None:
-        return _CS_ITEMSIZE_DATA
-    try:
-        if os.path.exists(CS_ITEMSIZE_FILE_PATH):
-            _CS_ITEMSIZE_DATA = pd.read_excel(CS_ITEMSIZE_FILE_PATH, dtype=str)
-            # Clean up column names
-            _CS_ITEMSIZE_DATA.columns = [str(c).strip() for c in _CS_ITEMSIZE_DATA.columns]
-            print(f"✅ Loaded CS ItemSize file with {len(_CS_ITEMSIZE_DATA)} records from CS_100826")
+def format_itemsize_prefix(base_style, size_str, reference_df):
+    matches = reference_df[reference_df["Style No"] == base_style]
+    if not matches.empty:
+        valid_items = matches["ItemSize"].dropna()
+        if not valid_items.empty:
+            first_itemsize = valid_items.iloc[0]
+            prefix = first_itemsize.split()[0] if " " in first_itemsize else re.match(r"^([A-Za-z]+)", str(first_itemsize)).group(1)
         else:
-            print(f"⚠️ CS ItemSize file not found at: {CS_ITEMSIZE_FILE_PATH}")
-            _CS_ITEMSIZE_DATA = pd.DataFrame()
-    except Exception as e:
-        print(f"⚠️ Error loading CS ItemSize file: {e}")
-        _CS_ITEMSIZE_DATA = pd.DataFrame()
-    return _CS_ITEMSIZE_DATA
-
-
-def _lookup_itemsize_from_cs_100826(style_code: str) -> str:
-    """
-    Look up ItemSize from CS_100826/BDL_CS_100826.xlsx based on StyleCode.
-    Matches the 'Client Style No' column and returns the 'ItemSize' value.
-    
-    Args:
-        style_code: The StyleCode to look up (e.g., "ZR1473SG-WG")
-    
-    Returns:
-        ItemSize string from CS file, or empty string if not found
-    """
-    cs_data = _load_cs_itemsize_data()
-    
-    if cs_data.empty:
-        return ""
-    
-    if 'Client Style No' not in cs_data.columns or 'ItemSize' not in cs_data.columns:
-        print(f"⚠️ Required columns not found in CS file. Available columns: {cs_data.columns.tolist()}")
-        return ""
-    
-    # Look for exact match in "Client Style No" column
-    matching_rows = cs_data[cs_data['Client Style No'].str.strip() == style_code]
-    
-    if not matching_rows.empty:
-        item_size = matching_rows.iloc[0]['ItemSize']
-        # Clean and format the ItemSize
-        if pd.notna(item_size) and str(item_size).strip():
-            item_size_str = str(item_size).strip()
-            print(f"📋 Found ItemSize '{item_size_str}' for StyleCode '{style_code}' in CS_100826")
-            return item_size_str
-    
-    print(f"⚠️ No ItemSize found in CS_100826 file for StyleCode '{style_code}'")
-    return ""
-
-
-def _lookup_client_style(style_no: str, size: str, metal: str) -> str:
-    """
-    Look up Client Style No from DHI_CS.xlsx, match by Style No, then find by size and metal!
-    If no match found, returns empty string!
-    """
-    df = _get_client_style_df()
-    if df.empty or "Client Style No" not in df.columns or "Style No" not in df.columns:
-        return ""  # No file found or columns missing
-
-    style_no = str(style_no).strip()
-    metal = str(metal).strip()
-    size = str(size).strip()
-
-    # First filter by Style No
-    filtered = df[df["Style No"].str.strip() == style_no]
-
-    if filtered.empty:
-        return ""  # No entries for this Style No
-
-    # Extract size number
-    size_num_str = re.search(r"(\d+(?:\.\d+)?)", size)
-    size_num = size_num_str.group(1) if size_num_str else ""
-    
-    # Find metal suffix to look for
-    if "PT" in metal or metal.startswith("PC95"):
-        metal_suffix = "PT"
-    elif metal.endswith("W"):
-        metal_suffix = "WG"
-    elif metal.endswith("Y"):
-        metal_suffix = "YG"
-    elif metal.endswith("P"):
-        metal_suffix = "RG"
-    elif "AG" in metal:
-        metal_suffix = "AG"
+            prefix = "TS"
     else:
-        metal_suffix = ""
-    
-    # First, look for Client Style No that has BOTH the size_num AND metal_suffix in it!
-    candidates = []
-    for idx, row in filtered.iterrows():
-        client_style = str(row["Client Style No"]).strip()
-        has_size = size_num in client_style
-        has_metal = metal_suffix in client_style
-        if has_size and has_metal:
-            candidates.append(client_style)
-    
-    if len(candidates) > 0:
-        # If multiple candidates, pick the shortest one (least extra stuff)
-        return min(candidates, key=len)
-    
-    # If no candidates with both, try with just size_num
-    for idx, row in filtered.iterrows():
-        client_style = str(row["Client Style No"]).strip()
-        if size_num in client_style:
-            return client_style
-    
-    # If that doesn't work, try with just metal_suffix
-    for idx, row in filtered.iterrows():
-        client_style = str(row["Client Style No"]).strip()
-        if metal_suffix in client_style:
-            return client_style
-    
-    # Last resort: return first entry
-    return str(filtered.iloc[0]["Client Style No"]).strip()
+        prefix = "TS"
 
-
-def _metal_karat_type(description: str, item_num: str):
-    """Return (karat_str, color_char) from description or item number."""
-    src = (description + " " + item_num).upper()
-    # Check for platinum first!
-    if "PT" in src or "PLATINUM" in src:
-        return "950", "PT"
-    # Then check for gold!
-    for kt in ['18K', '14K']:
-        for col in ['W', 'Y', 'P']:
-            if f"{kt}{col}" in src:
-                return kt.replace('K', ''), col
-    return '14', 'W'
-
-
-def _build_style_code(item_num: str, size: str, description: str, metal: str) -> str:
-    """
-    Build StyleCode — e.g. ZR2740L-7WG or RG0001964QA-9PT
-    ZR items always use size 7 in the StyleCode (catalog standard).
-    All other items use the actual ordered size.
-    Prefix (UP/US/TS) is NOT included here — it belongs in ItemSize only.
-    """
-    base = re.sub(r'^[\d]+K[WYPR]*\s*', '', item_num.strip(), flags=re.IGNORECASE)
-    _, color = _metal_karat_type(description, item_num)
-    sz = '7' if base.upper().startswith('ZR') else (size.strip() or '7')
-    
-    if metal.startswith("PC95") or "PT" in metal:
-        metal_sfx = "PT"
-    else:
-        metal_sfx = f"{color}G" if color in ('W', 'Y') else 'P'
-    
-    return f"{base}-{sz}{metal_sfx}"
-
-
-def _build_item_size(size: str, prefix: str) -> str:
-    """Build ItemSize — UP07 / US07 / TS 07"""
-    sz = size.strip() if size.strip() else '7'
-    # Pad integer sizes to 2 digits; leave decimals as-is
     try:
-        sz = str(int(float(sz))).zfill(2) if float(sz) == int(float(sz)) else sz
-    except (ValueError, OverflowError):
-        sz = sz.zfill(2)
-    return f"TS {sz}" if prefix == 'TS' else f"{prefix}{sz}"
+        size_val = float(size_str)
+        if size_val == int(size_val):
+            size_num = int(size_val)
+            if size_num < 10:
+                return f"{prefix} {size_num:02d}"
+            else:
+                return f"{prefix} {size_num}"
+        else:
+            return f"{prefix} {size_str}"
+    except ValueError:
+        return f"{prefix} {size_str}"
 
 
-def _build_metal(description: str, item_num: str, recycled: bool) -> str:
-    """Map description to metal code: G14W / G14WZ / G14Y / G18W …"""
-    karat, color = _metal_karat_type(description, item_num)
-    suffix = 'Z' if recycled else ''
-    if color == "PT":
-        return f"PC95{suffix}"
-    if color in ('W', 'Y'):
-        return f"G{karat}{color}{suffix}"
-    return f"PC95{suffix}"
+def build_style_code(base_style, size_str, tone_suffix, reference_df, order_group=""):
+    is_costco = (order_group or "").strip().lower() == "costco"
 
+    candidate = f"{base_style}-{size_str}{tone_suffix}"
+    if is_costco:
+        candidate = f"{candidate}CO"
 
-def _get_tone(metal: str) -> str:
-    if metal.startswith('PC95') or metal.startswith('PT'):
-        return 'PT'
-    if 'W' in metal:
-        return 'W'
-    if 'Y' in metal:
-        return 'Y'
-    return 'P'
+    lookup_candidate = candidate
+    if is_costco:
+        lookup_candidate = f"{base_style}-{size_str}{tone_suffix}"
 
+    matches = reference_df[reference_df["Client Style No"] == lookup_candidate]
+    if not matches.empty:
+        row = matches.iloc[0]
+        itemsize = row["ItemSize"] if pd.notna(row["ItemSize"]) else None
+        return candidate, itemsize
 
-def _metal_to_label(metal: str) -> str:
-    mapping = {
-        'G14W':  '14 WHITE GOLD',  'G14WZ': '14 WHITE GOLD',
-        'G14Y':  '14 YELLOW GOLD', 'G14YZ': '14 YELLOW GOLD',
-        'G18W':  '18 WHITE GOLD',  'G18WZ': '18 WHITE GOLD',
-        'G18Y':  '18 YELLOW GOLD', 'G18YZ': '18 YELLOW GOLD',
-        'PC95':  'PLATINUM',       'PC95Z': 'PLATINUM',
-        'PT':    'PLATINUM',       'PTZ':   'PLATINUM',
-    }
-    for k, v in mapping.items():
-        if metal.startswith(k):
-            return v
-    return metal
+    style_matches = reference_df[reference_df["Style No"] == base_style]
+    if not style_matches.empty:
+        for _, row in style_matches.iterrows():
+            client_style = row["Client Style No"]
+            if pd.notna(client_style):
+                parts = str(client_style).rsplit("-", 1)
+                if len(parts) == 2:
+                    ref_tone_part = parts[1]
+                    match = re.match(r"^([\d.]+)([A-Z]+)$", ref_tone_part, re.IGNORECASE)
+                    if match and match.group(2).upper() == tone_suffix.upper():
+                        itemsize = format_itemsize_prefix(base_style, size_str, reference_df)
+                        return candidate, itemsize
 
+    itemsize = format_itemsize_prefix(base_style, size_str, reference_df)
+    return candidate, itemsize
 
-def _build_special_remark(order_group: str, sku_no: str, metal: str) -> str:
-    parts = [p for p in [order_group, sku_no, _metal_to_label(metal), 'DIA QLTY-LGD-GH VS'] if p]
-    return ','.join(parts)
-
-
-def _extract_stamp_instruction_for_size(notes_text: str, size: str) -> str:
+def is_item_row(line):
     """
-    Extract specific stamping text from Notes correlating with the item's size.
+    Detect whether a line starts a new order/item row.
+
+    Examples:
+        1 SZ5 RG0003054K ...
+        2 R63738-PT-EL-CSTRG0003054K ...
+        3 SZ6 RG0003054K ...
+        4 SZ8 RG0003054K ...
     """
-    if not notes_text:
-        return ""
-    
-    sz_norm = size.strip()
-    lines = notes_text.split('\n')
-    
-    # 1. Attempt a line match where the specific size context and "Stamping" coexist
-    for line in lines:
-        if "stamping" in line.lower():
-            if f"SZ{sz_norm}" in line or f"/ {sz_norm}/" in line or f"-SZ{sz_norm}" in line or line.strip().startswith(f"R63738-PT-SZ{sz_norm}"):
-                m = re.search(r"Stamping\s*[:\-]?\s*([^/\n\r]+)", line, flags=re.IGNORECASE)
-                if m:
-                    return m.group(1).strip().replace('"', '').replace("'", "")
-                    
-    # 2. Fallback: Parse all stamp expressions and find the one containing or ending with the size string
-    matches = re.findall(r"Stamping\s*[:\-]?\s*([^/\n\r]+)", notes_text, flags=re.IGNORECASE)
-    if matches:
-        for match in matches:
-            cleaned = match.strip().replace('"', '').replace("'", "")
-            if cleaned.endswith(sz_norm) or f" {sz_norm}" in cleaned:
-                return cleaned
-        # Default fallback to the very first match if layout breaks rules
-        return matches[0].strip().replace('"', '').replace("'", "")
-    
-    return ""
 
+    if not line:
+        return False
 
-# ─────────────────────────────────────────────
-#  PDF READERS
-# ─────────────────────────────────────────────
+    line = line.strip()
 
-def _read_pdf_text(pdf_path: str) -> str:
-    full_text = ""
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                full_text += page_text + "\n"
-    return full_text
+    pattern_a = re.match(
+        r"^\s*\d+\s+SZ\s*[\d.]+\s+[A-Z]{2}\d{4,}[A-Z0-9]*\b",
+        line,
+        re.IGNORECASE
+    )
+    if pattern_a:
+        return True
 
+    pattern_b = re.match(
+        r"^\s*\d+\s+\S+[A-Z]{2}\d{4,}[A-Z0-9]*\b",
+        line,
+        re.IGNORECASE
+    )
+    if pattern_b:
+        style_part = re.search(r"[A-Z]{2}\d{4,}[A-Z0-9]*\b", line, re.IGNORECASE)
+        if style_part and "$" in line:
+            return True
 
-def _parse_header(raw_text: str) -> dict:
+    return False
+
+def _extract_common_po_fields(full_text):
+    """Extract PO-level fields shared by different VPO layouts."""
+    def find(pattern):
+        m = re.search(pattern, full_text, re.IGNORECASE | re.MULTILINE)
+        return m.group(1).strip() if m else None
+
+    order_number = find(r"Order\s*#:\s*(\d+)")
+    po_number = find(r"P\.?O\.?\s*#:\s*([^\n]+)")
+    po_date = find(r"\bDate:\s*(\d{1,2}/\d{1,2}/\d{2,4})")
+    due_date = find(r"\bDue\s*Date:\s*(\d{1,2}/\d{1,2}/\d{2,4})")
+
+    # Some VPO layouts put PO information on the same line/without labels.
+    if po_number:
+        po_number = po_number.strip()
+
+    dia_quality = ""
+    dq_match = re.search(r"Diamond\s+Quality\s+([^\n]+)", full_text, re.IGNORECASE)
+    if dq_match:
+        dia_quality = dq_match.group(1).strip()
+
+    stamping = ""
+    stamp_match = re.search(r"Stamping\s+([^\n]+)", full_text, re.IGNORECASE)
+    if stamp_match:
+        stamping = stamp_match.group(1).strip()
+
     return {
-        "Order #":     _find(r"Order\s*#[:\s]+(\S+)", raw_text),
-        "P.O. #":      _find(r"P\.O\.\s*#[:\s]+(\S+)", raw_text),
-        "Date":        _find(r"Date[:\s]+([\d/]+)", raw_text),
-        "Due Date":    _find(r"Due\s*Date[:\s]+([\d/]+)", raw_text),
-        "Cancel Date": _find(r"Cancel\s*Date[:\s]+([\d/]+)", raw_text),
-        "Reference":   _find(r"Reference[:\s]+(\S+)", raw_text),
-        "Vendor #":    _find(r"Vendor\s*#[:\s]*(\S+)", raw_text),
-        "Phone #":     _find(r"Phone\s*#[:\s]+(\S+)", raw_text),
-        "Ship Via":    _find(r"Ship\s*Via[:\s]+(\S+)", raw_text),
+        "order_number": order_number,
+        "po_number": po_number,
+        "po_date": po_date,
+        "due_date": due_date,
+        "dia_quality": dia_quality,
+        "stamping": stamping,
     }
 
 
-# ─────────────────────────────────────────────
-#  WORD-POSITION LINE-ITEM PARSER
-# ─────────────────────────────────────────────
+def _clean_pdf_lines(full_text):
+    """Normalize pdfplumber output without destroying meaningful item text."""
+    result = []
 
-_Y_TOL = 6   # pixels: group words within this vertical band into one row
+    for raw_line in full_text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
 
+        if not line:
+            result.append("")
+            continue
 
-def _group_into_rows(words):
-    if not words:
-        return []
-    sorted_words = sorted(words, key=lambda w: w['top'])
-    rows = []
-    current_y = sorted_words[0]['top']
-    current_group = []
-    for w in sorted_words:
-        if abs(w['top'] - current_y) <= _Y_TOL:
-            current_group.append(w)
-        else:
-            rows.append((current_y, sorted(current_group, key=lambda w: w['x0'])))
-            current_y = w['top']
-            current_group = [w]
-    if current_group:
-        rows.append((current_y, sorted(current_group, key=lambda w: w['x0'])))
-    return rows
+        # Remove the common copyright/page noise only when it is clearly noise.
+        if re.match(r"^(RightClick®|Page\s*#?:|Grand\s+Total:?)", line, re.IGNORECASE):
+            continue
+
+        result.append(line)
+
+    return result
 
 
-def _find_header_row(rows):
-    for i, (y, row_words) in enumerate(rows):
-        texts = {w['text'] for w in row_words}
-        if '#' in texts and 'Memo' in texts and 'Description' in texts:
-            return i, y
-    return None, None
+def _parse_standard_vpo_layout(lines, common):
+    """
+    Existing-style parser.
 
+    This retains the original parser's recognition strategy but makes the
+    header detection less brittle and isolates it from the alternate layout.
+    """
+    orders = []
 
-def _col_x(header_words):
-    cx = {}
-    for w in header_words:
-        t = w['text']
-        x = w['x0']
-        if t == '#' and 'hash' not in cx:            cx['hash'] = x
-        elif t == 'Memo':                             cx['memo_hdr'] = x
-        elif t == 'Item' and 'item_hdr' not in cx:  cx['item_hdr'] = x
-        elif t == 'Vendor':                          cx['vendor_hdr'] = x
-        elif t == 'Job':                             cx['job_hdr'] = x
-        elif t == 'Description':                     cx['desc_hdr'] = x
-        elif t == 'Size':                            cx['size_hdr'] = x
-        elif t == 'Quantity':                        cx['qty_hdr'] = x
-        elif t == 'Weight':                          cx['weight_hdr'] = x
-        elif t == 'Amount':                          cx['amount_hdr'] = x
-    return cx
+    header_idx = None
+    for idx, line in enumerate(lines):
+        if re.search(
+            r"Memo.*Item.*Description.*Size.*Quantity",
+            line,
+            re.IGNORECASE,
+        ):
+            header_idx = idx
+            break
 
+    if header_idx is None:
+        # Try the common header in a more tolerant order.
+        for idx, line in enumerate(lines):
+            if (
+                re.search(r"\bMemo\b", line, re.IGNORECASE)
+                and re.search(r"\bItem\b", line, re.IGNORECASE)
+                and re.search(r"\bDescription\b", line, re.IGNORECASE)
+            ):
+                header_idx = idx
+                break
 
-def _assign_col(x, cx):
-    hash_x     = cx.get('hash', 45)
-    item_hdr   = cx.get('item_hdr', 101)
-    vendor_hdr = cx.get('vendor_hdr', 166)
-    job_hdr    = cx.get('job_hdr', 223)
-    desc_hdr   = cx.get('desc_hdr', 281)
-    size_hdr   = cx.get('size_hdr', 360)
-    qty_hdr    = cx.get('qty_hdr', 389)
-    weight_hdr = cx.get('weight_hdr', 430)
-    amount_hdr = cx.get('amount_hdr', 541)
+    if header_idx is None:
+        return orders
 
-    b_line_memo  = (hash_x + item_hdr) / 2
-    b_memo_item  = (item_hdr + vendor_hdr) / 2
-    b_item_job   = (vendor_hdr + job_hdr) / 2
-    b_job_desc   = (job_hdr + desc_hdr) / 2
+    memo_prefix = ""
+    i = header_idx + 1
 
-    if x < b_line_memo:
-        return 'line_no'
-    elif x < b_memo_item:
-        return 'memo'
-    elif x < b_item_job:
-        return 'item_no'
-    elif x < b_job_desc:
-        return 'job_bag'
-    elif x < size_hdr:
-        return 'desc_or_sku'
-    elif x < qty_hdr:
-        return 'size'
-    elif x < weight_hdr:
-        return 'qty'
-    elif x < weight_hdr + 25:
-        return 'weight'
-    elif x < amount_hdr - 20:
-        return 'unit_cost'
-    else:
-        return 'amount'
+    def _is_new_memo_prefix_line(cl):
+        ct = cl.split()
+        return bool(
+            len(ct) >= 1
+            and (
+                re.match(r"^[A-Z]\d{4,}[-]", ct[0], re.IGNORECASE)
+                or re.match(r"^SKU#", ct[0], re.IGNORECASE)
+            )
+        )
 
+    while i < len(lines):
+        line = lines[i].strip()
 
-def _parse_line_items_by_position(pdf_path: str):
-    all_items_raw = []
-    all_notes = []
+        if not line:
+            i += 1
+            continue
 
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            words = page.extract_words()
-            if not words:
-                continue
+        if (
+            re.match(r"^Diamond\s+Quality", line, re.IGNORECASE)
+            or re.match(r"^Stamping", line, re.IGNORECASE)
+            or re.match(r"^Grand\s+Total", line, re.IGNORECASE)
+            or re.match(r"^RightClick", line, re.IGNORECASE)
+            or re.match(r"^\d{4,}", line)
+        ):
+            i += 1
+            continue
 
-            rows = _group_into_rows(words)
-            hdr_idx, hdr_y = _find_header_row(rows)
-            if hdr_idx is None:
-                continue
+        line_tokens = line.split()
+        memo_prefix_line_captured = None
 
-            cx = _col_x(rows[hdr_idx][1])
+        if memo_prefix == "" and _is_new_memo_prefix_line(line):
+            memo_prefix_line_captured = line
+            memo_prefix = line_tokens[0]
+            desc_from_prefix = " ".join(line_tokens[1:]) if len(line_tokens) > 1 else ""
+            i += 1
 
-            gt_y = None
-            for (y, rw) in rows:
-                if any('Grand' in w['text'] for w in rw):
-                    gt_y = y
-                    break
+            if i < len(lines):
+                next_line = lines[i].strip()
+                next_tokens = next_line.split()
 
-            data_rows = []
-            notes_rows = []
-            in_notes = False
-            for (y, rw) in rows[hdr_idx + 1:]:
-                if gt_y is not None and y >= gt_y:
-                    break
-                texts = [w['text'] for w in rw]
-                assigned_cols = {_assign_col(w['x0'], cx) for w in rw}
-                is_non_data = (
-                    assigned_cols.issubset({'qty', 'weight', 'unit_cost', 'amount'})
-                    and not any(_assign_col(w['x0'], cx) == 'line_no' for w in rw)
-                    and not any(_assign_col(w['x0'], cx) == 'memo' for w in rw)
-                    and not any(_assign_col(w['x0'], cx) == 'desc_or_sku' for w in rw)
-                )
-                if is_non_data:
-                    in_notes = True
-                    continue
-                if in_notes:
-                    notes_rows.append((y, rw))
-                else:
-                    data_rows.append((y, rw))
+                item_patt = re.compile(r"[A-Z]{2}\d{4,}[A-Z0-9]*")
+                style_idx = None
+                base_style = None
 
-            items = []
-            cur = None
-
-            for (y, rw) in data_rows:
-                row_cols = {}
-                for w in rw:
-                    col = _assign_col(w['x0'], cx)
-                    row_cols.setdefault(col, []).append(w['text'])
-
-                has_line_no = 'line_no' in row_cols and any(
-                    t.isdigit() for t in row_cols['line_no']
-                )
-
-                if has_line_no:
-                    if cur is not None:
-                        items.append(cur)
-                    line_no_val = next((t for t in row_cols.get('line_no', []) if t.isdigit()), '1')
-                    cur = {
-                        'line_no':    line_no_val,
-                        'memo_parts': row_cols.get('memo', []),
-                        'item_parts': row_cols.get('item_no', []),
-                        'job_bag':    ' '.join(row_cols.get('job_bag', [])),
-                        'sku_parts':  [],
-                        'desc_parts': [],
-                        'size':       ' '.join(row_cols.get('size', [])),
-                        'qty':        ' '.join(row_cols.get('qty', [])),
-                        'weight':     ' '.join(row_cols.get('weight', [])),
-                        'unit_cost':  ' '.join(row_cols.get('unit_cost', [])),
-                        'amount':     ' '.join(row_cols.get('amount', [])),
-                    }
-                    for t in row_cols.get('desc_or_sku', []):
-                        if t.startswith('SKU#') or t.startswith('SKU '):
-                            cur['sku_parts'].append(t)
-                        else:
-                            cur['desc_parts'].append(t)
-                else:
-                    if cur is None:
-                        cur = {
-                            'line_no': '1', 'memo_parts': [], 'item_parts': [],
-                            'job_bag': '', 'sku_parts': [], 'desc_parts': [],
-                            'size': '', 'qty': '', 'weight': '', 'unit_cost': '', 'amount': '',
-                        }
-                    cur['memo_parts'].extend(row_cols.get('memo', []))
-                    cur['item_parts'].extend(row_cols.get('item_no', []))
-                    if not cur['job_bag']:
-                        cur['job_bag'] = ' '.join(row_cols.get('job_bag', []))
-                    if not cur['size']:
-                        cur['size'] = ' '.join(row_cols.get('size', []))
-                    if not cur['qty']:
-                        cur['qty'] = ' '.join(row_cols.get('qty', []))
-                    for t in row_cols.get('desc_or_sku', []):
-                        if t.startswith('SKU#') or t.startswith('SKU '):
-                            cur['sku_parts'].append(t)
-                        else:
-                            cur['desc_parts'].append(t)
-
-            if cur is not None:
-                items.append(cur)
-
-            for raw in items:
-                memo_str = ''.join(raw['memo_parts'])
-                
-                item_str = ' '.join(raw['item_parts']).strip()
-                if not item_str and memo_str:
-                    for prefix in ['RG', 'ZR', 'PR', 'XR']:
-                        if prefix in memo_str:
-                            split_idx = memo_str.rfind(prefix)
-                            if split_idx > 0:
-                                item_str = memo_str[split_idx:]
-                                memo_str = memo_str[:split_idx]
-                                raw['item_parts'] = [item_str]
-                                break
-
-                size_str = raw['size'].strip()
-                if not size_str:
-                    m = re.search(r'[Ss][Zz]([\d.]+)', memo_str)
+                for ti, tok in enumerate(next_tokens):
+                    m = item_patt.search(tok)
                     if m:
-                        size_str = m.group(1)
-                if not size_str:
-                    size_str = '7'
+                        style_idx = ti
+                        base_style = m.group()
+                        break
 
-                item_str = ' '.join(raw['item_parts']).strip()
-                desc_str = ' '.join(raw['desc_parts']).strip()
-                sku_str = ' '.join(raw['sku_parts']).strip()
+                if style_idx is not None and style_idx >= 1:
+                    memo_suffix = "".join(next_tokens[1:style_idx])
+                    full_memo = (memo_prefix + memo_suffix).replace(" ", "")
 
-                qty_raw = raw['qty'].replace('$', '').strip()
-                qty = 1
-                m_qty = re.search(r'\d+', qty_raw)
-                if m_qty:
-                    qty = int(m_qty.group())
-                
-                if memo_str or item_str or desc_str or sku_str:
-                    all_items_raw.append({
-                        'Line #':        raw['line_no'],
-                        'Memo #':        memo_str,
-                        'Item #':        item_str,
-                        'Vendor Item #': sku_str,
-                        'Job Bag #':     raw['job_bag'],
-                        'Description':   desc_str,
-                        'Size':          size_str,
-                        'Quantity':      qty,
+                    price_idx = None
+                    for ti in range(len(next_tokens) - 1, -1, -1):
+                        if "$" in next_tokens[ti]:
+                            price_idx = ti
+                            break
+
+                    size_val = None
+                    qty_val = 1
+
+                    if price_idx is not None and price_idx >= 4:
+                        weight_idx = price_idx - 2
+                        qty_idx = weight_idx - 1
+                        size_idx = weight_idx - 2
+
+                        if size_idx > style_idx:
+                            size_val = next_tokens[size_idx]
+
+                        if qty_idx > style_idx:
+                            try:
+                                qty_val = int(next_tokens[qty_idx])
+                            except (ValueError, TypeError):
+                                qty_val = 1
+
+                    sz_match = re.search(r"SZ\s*([\d.]+)", next_line, re.IGNORECASE)
+                    if sz_match and size_val is None:
+                        size_val = sz_match.group(1)
+
+                    desc_parts = []
+                    if desc_from_prefix:
+                        desc_parts.append(desc_from_prefix)
+
+                    if price_idx is not None:
+                        slice_end = (
+                            price_idx - 5
+                            if (price_idx - 5) > (style_idx + 1)
+                            else len(next_tokens)
+                        )
+                        mid_tokens = next_tokens[style_idx + 1:slice_end]
+                    else:
+                        mid_tokens = next_tokens[style_idx + 1:]
+
+                    filtered_mid = []
+                    for ti, tok in enumerate(mid_tokens):
+                        if tok == "$" or tok.startswith("$"):
+                            break
+                        if tok == "Q" and ti >= len(mid_tokens) - 3:
+                            break
+                        filtered_mid.append(tok)
+
+                    if filtered_mid:
+                        desc_parts.append(" ".join(filtered_mid))
+
+                    j = i + 1
+                    while j < len(lines) and j < i + 4:
+                        cont_line = lines[j].strip()
+
+                        if is_item_row(cont_line) or _is_new_memo_prefix_line(cont_line):
+                            break
+
+                        cont_tokens = cont_line.split()
+
+                        is_summary_line = (
+                            len(cont_tokens) == 2
+                            and re.match(r"^\d+$", cont_tokens[0])
+                            and re.match(r"^[\d.]+$", cont_tokens[1])
+                        )
+
+                        is_meta_line = bool(
+                            re.match(
+                                r"^(Diamond|Stamping|Grand\s+Total|RightClick|\d{8})",
+                                cont_line,
+                                re.IGNORECASE,
+                            )
+                        )
+
+                        if is_summary_line or is_meta_line or not cont_line:
+                            break
+
+                        desc_parts.append(cont_line)
+                        j += 1
+
+                    full_description = " ".join(desc_parts)
+                    full_description = re.sub(r"\s{2,}", " ", full_description).strip()
+
+                    size = None
+                    sz_match = re.search(
+                        r"SZ\s*([\d.]+)",
+                        full_description,
+                        re.IGNORECASE,
+                    )
+                    if sz_match:
+                        size = sz_match.group(1)
+                    elif size_val is not None:
+                        size = size_val
+
+                    if size:
+                        try:
+                            sv = float(size)
+                            if sv == int(sv):
+                                size = str(int(sv))
+                        except (ValueError, TypeError):
+                            pass
+
+                    cleaned_desc = re.sub(
+                        r"\b\d+\s+\d\s+[\d.]+\b",
+                        "",
+                        full_description,
+                    )
+                    cleaned_desc = re.sub(r"\s{2,}", " ", cleaned_desc).strip()
+
+                    raw_block = (
+                        (memo_prefix_line_captured or "") + " " + next_line
+                    ).strip()
+
+                    orders.append({
+                        "base_style": base_style,
+                        "description": cleaned_desc,
+                        "raw_description_block": raw_block,
+                        "size": size if size else "1",
+                        "qty": qty_val,
+                        "memo": full_memo,
+                        "dia_quality": common["dia_quality"],
+                        "stamping": common["stamping"],
+                        "order_number": common["order_number"],
+                        "po_number": common["po_number"],
+                        "po_date": common["po_date"],
+                        "due_date": common["due_date"],
                     })
 
-            for (y, rw) in notes_rows:
-                line_text = ' '.join(w['text'] for w in rw)
-                if 'RightClick' in line_text or 'Copyright' in line_text or line_text.startswith('2023') or line_text.startswith('2024') or line_text.startswith('2025') or line_text.startswith('2026'):
+                    memo_prefix = ""
+                    i = j
                     continue
-                all_notes.append(line_text)
 
-    notes_text = '\n'.join(all_notes).strip()
-    return all_items_raw, notes_text
+            memo_prefix = ""
+            i += 1
+            continue
+
+        item_patt = re.compile(r"[A-Z]{2}\d{4,}[A-Z0-9]*")
+        item_match = item_patt.search(line)
+
+        if item_match and "$" in line:
+            base_style = item_match.group()
+            next_tokens = line_tokens
+
+            style_idx = None
+            for ti, tok in enumerate(next_tokens):
+                if item_patt.search(tok):
+                    style_idx = ti
+                    break
+
+            memo_full = ""
+            if style_idx is not None and style_idx >= 2:
+                memo_parts = next_tokens[1:style_idx]
+                memo_full = (
+                    (memo_prefix + "".join(memo_parts)).replace(" ", "")
+                    if memo_prefix
+                    else "".join(memo_parts)
+                )
+
+            price_idx = None
+            for ti in range(len(next_tokens) - 1, -1, -1):
+                if "$" in next_tokens[ti]:
+                    price_idx = ti
+                    break
+
+            qty_val = 1
+            size_val = None
+
+            if price_idx is not None and price_idx >= 4:
+                try:
+                    qty_val = int(next_tokens[price_idx - 3])
+                except (ValueError, IndexError, TypeError):
+                    qty_val = 1
+
+                try:
+                    size_val = next_tokens[price_idx - 4]
+                except IndexError:
+                    size_val = None
+
+            sz_match = re.search(r"SZ\s*([\d.]+)", line, re.IGNORECASE)
+            if sz_match and size_val is None:
+                size_val = sz_match.group(1)
+
+            desc_parts = []
+            if style_idx is not None and price_idx is not None:
+                slice_end = (
+                    price_idx - 5
+                    if (price_idx - 5) > (style_idx + 1)
+                    else len(next_tokens)
+                )
+                desc_parts.append(
+                    " ".join(next_tokens[style_idx + 1:slice_end])
+                )
+
+            j = i + 1
+            while j < len(lines) and j < i + 4:
+                cont_line = lines[j].strip()
+
+                if is_item_row(cont_line) or _is_new_memo_prefix_line(cont_line):
+                    break
+
+                cont_tokens = cont_line.split()
+
+                is_summary_line = (
+                    len(cont_tokens) == 2
+                    and re.match(r"^\d+$", cont_tokens[0])
+                    and re.match(r"^[\d.]+$", cont_tokens[1])
+                )
+
+                is_meta_line = bool(
+                    re.match(
+                        r"^(Diamond|Stamping|Grand\s+Total|RightClick|\d{8})",
+                        cont_line,
+                        re.IGNORECASE,
+                    )
+                )
+
+                if is_summary_line or is_meta_line or not cont_line:
+                    break
+
+                desc_parts.append(cont_line)
+                j += 1
+
+            full_description = " ".join(desc_parts)
+            full_description = re.sub(r"\s{2,}", " ", full_description).strip()
+
+            size = None
+            sz_match = re.search(
+                r"SZ\s*([\d.]+)",
+                full_description,
+                re.IGNORECASE,
+            )
+            if sz_match:
+                size = sz_match.group(1)
+            elif size_val is not None:
+                size = size_val
+
+            if size:
+                try:
+                    sv = float(size)
+                    if sv == int(sv):
+                        size = str(int(sv))
+                except (ValueError, TypeError):
+                    pass
+
+            raw_block_full = line
+            if memo_prefix_line_captured:
+                raw_block_full = memo_prefix_line_captured + " " + raw_block_full
+
+            orders.append({
+                "base_style": base_style,
+                "description": full_description,
+                "raw_description_block": raw_block_full,
+                "size": size if size else "1",
+                "qty": qty_val,
+                "memo": memo_full,
+                "dia_quality": common["dia_quality"],
+                "stamping": common["stamping"],
+                "order_number": common["order_number"],
+                "po_number": common["po_number"],
+                "po_date": common["po_date"],
+                "due_date": common["due_date"],
+            })
+
+            memo_prefix = ""
+            i = j
+            continue
+
+        i += 1
+
+    return orders
 
 
-# ─────────────────────────────────────────────
-#  PUBLIC PROCESSOR
-# ─────────────────────────────────────────────
+def _parse_alternate_vpo_layout(lines, common):
+    """
+    Parser for VPO layouts containing:
+
+        Item #
+        Quantity
+        Vendor Item #
+        Cost
+        Amount
+        ...
+        Description
+        Memo #
+
+    Example item block:
+
+        1
+        108
+        $0.00
+        $0.00
+        SKU:1507287 14KW
+        1.40CTW I VS Round
+        Diamond Studs w/
+        Gurdian Back (Only for labor)
+        0.0000
+        Q
+        ER140-14KW-SEMI
+        108
+        0.0000
+    """
+    orders = []
+
+    # Locate the alternate header.
+    header_idx = None
+    for idx, line in enumerate(lines):
+        if (
+            re.search(r"\bItem\s*#?\b", line, re.IGNORECASE)
+            and re.search(r"\bQuantity\b", line, re.IGNORECASE)
+            and re.search(r"\bVendor\s+Item\s*#?\b", line, re.IGNORECASE)
+            and re.search(r"\bDescription\b", line, re.IGNORECASE)
+        ):
+            header_idx = idx
+            break
+
+    # In pdfplumber the header can be split into separate lines.
+    if header_idx is None:
+        item_idx = next(
+            (
+                i for i, x in enumerate(lines)
+                if re.fullmatch(r"#?\s*Item\s*#?", x, re.IGNORECASE)
+            ),
+            None,
+        )
+        if item_idx is not None:
+            window = " ".join(lines[item_idx:item_idx + 20])
+            if (
+                re.search(r"\bQuantity\b", window, re.IGNORECASE)
+                and re.search(r"\bVendor\s+Item\b", window, re.IGNORECASE)
+                and re.search(r"\bDescription\b", window, re.IGNORECASE)
+            ):
+                header_idx = item_idx
+
+    if header_idx is None:
+        return orders
+
+    # We need a numbered item followed somewhere by a quantity.
+    i = header_idx + 1
+
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Skip obvious page/summary/footer content.
+        if not line:
+            i += 1
+            continue
+
+        if re.match(
+            r"^(Purchase Order|DHARM INTERNATIONAL LLC|Grand\s+Total|"
+            r"RightClick|Page\s*#?:)",
+            line,
+            re.IGNORECASE,
+        ):
+            i += 1
+            continue
+
+        # Item number is a standalone integer.
+        if not re.fullmatch(r"\d+", line):
+            i += 1
+            continue
+
+        item_no = line
+
+        # Quantity should follow the item number.
+        if i + 1 >= len(lines) or not re.fullmatch(r"\d+", lines[i + 1].strip()):
+            i += 1
+            continue
+
+        qty_val = int(lines[i + 1].strip())
+        j = i + 2
+
+        # Skip cost and amount.
+        money_seen = 0
+        while j < len(lines) and money_seen < 2:
+            token = lines[j].strip()
+
+            if re.fullmatch(r"\$[\d,]+(?:\.\d+)?", token):
+                money_seen += 1
+                j += 1
+                continue
+
+            # Be tolerant of OCR/pdfplumber splitting "$" and amount.
+            if token == "$" and j + 1 < len(lines):
+                if re.fullmatch(r"[\d,]+(?:\.\d+)?", lines[j + 1].strip()):
+                    money_seen += 1
+                    j += 2
+                    continue
+
+            break
+
+        # Search for the description/memo area until the next item/footer.
+        block_start = j
+        block = []
+
+        while j < len(lines):
+            token = lines[j].strip()
+
+            if not token:
+                j += 1
+                continue
+
+            # A new numbered item with a following quantity starts a new row.
+            if (
+                re.fullmatch(r"\d+", token)
+                and j + 1 < len(lines)
+                and re.fullmatch(r"\d+", lines[j + 1].strip())
+            ):
+                break
+
+            if re.match(
+                r"^(All findings|Purchase Order|DHARM INTERNATIONAL LLC|"
+                r"Grand\s+Total|RightClick|Page\s*#?:)",
+                token,
+                re.IGNORECASE,
+            ):
+                break
+
+            block.append(token)
+            j += 1
+
+        if not block:
+            i += 1
+            continue
+
+        # Vendor item/style is generally an alphanumeric code containing
+        # both letters and digits, often with hyphens.
+        style_candidates = []
+
+        for pos, token in enumerate(block):
+            clean = token.strip()
+
+            # Exclude obvious non-style numeric values.
+            if re.fullmatch(r"[\d.]+", clean):
+                continue
+
+            # Strong style-code candidates.
+            if (
+                re.search(r"[A-Z]", clean, re.IGNORECASE)
+                and re.search(r"\d", clean)
+                and (
+                    "-" in clean
+                    or re.fullmatch(r"[A-Z]{1,6}\d[A-Z0-9\-]*", clean, re.IGNORECASE)
+                )
+            ):
+                style_candidates.append((pos, clean))
+
+        # Prefer the candidate appearing later in the block. In this layout
+        # Vendor Item # occurs after weight/unit/description.
+        base_style = None
+        style_pos = None
+
+        if style_candidates:
+            style_pos, base_style = style_candidates[-1]
+
+        # SKU/memo extraction.
+        memo = ""
+        sku_match = None
+
+        for token in block:
+            m = re.search(r"\bSKU\s*[:#]?\s*([A-Z0-9._/\-]+)", token, re.IGNORECASE)
+            if m:
+                sku_match = m.group(1)
+                break
+
+        if sku_match:
+            memo = sku_match
+
+        # Description is everything before the trailing weight/unit/vendor
+        # item section. Keep the metal token such as 14KW in the description
+        # because parse_metal_from_description() uses it.
+        desc_tokens = []
+
+        if style_pos is not None:
+            pre_style = block[:style_pos]
+        else:
+            pre_style = block
+
+        # Remove obvious trailing numeric fields while retaining real
+        # description text and SKU/metal information.
+        for token in pre_style:
+            if re.fullmatch(r"[\d.]+", token):
+                continue
+            if re.fullmatch(r"[A-Z]", token) and token.upper() in {"Q", "EA", "PCS"}:
+                continue
+            desc_tokens.append(token)
+
+        description = " ".join(desc_tokens)
+        description = re.sub(r"\s+", " ", description).strip()
+
+        # If SKU exists, preserve the SKU line because it may contain the
+        # metal/tone (e.g. "SKU:1507287 14KW").
+        if not description:
+            description = " ".join(block)
+
+        # Extract size from explicit SZ/SIZE or from common "1.40CTW"
+        # descriptions only if it actually looks like a ring size.
+        size = extract_size_from_text(description)
+
+        # For this layout there is often no item size. Do NOT incorrectly
+        # use diamond carat weight as the size.
+        if size is None:
+            size = "1"
+
+        raw_block = " ".join(block)
+
+        orders.append({
+            "base_style": base_style or "",
+            "description": description,
+            "raw_description_block": raw_block,
+            "size": size,
+            "qty": qty_val,
+            "memo": memo,
+            "dia_quality": common["dia_quality"],
+            "stamping": common["stamping"],
+            "order_number": common["order_number"],
+            "po_number": common["po_number"],
+            "po_date": common["po_date"],
+            "due_date": common["due_date"],
+        })
+
+        i = j
+
+    return orders
+
+
+def _fallback_generic_item_parser(lines, common):
+    """
+    Last-resort parser.
+
+    This prevents a valid VPO from being rejected solely because its
+    presentation/order of columns changed. It only accepts a row when it can
+    identify both a numeric quantity and a plausible vendor/style code.
+    """
+    orders = []
+
+    for i, line in enumerate(lines):
+        if not re.fullmatch(r"\d+", line):
+            continue
+
+        # Quantity immediately after item number.
+        if i + 1 >= len(lines) or not re.fullmatch(r"\d+", lines[i + 1]):
+            continue
+
+        qty = int(lines[i + 1])
+
+        block = []
+        j = i + 2
+
+        while j < len(lines) and len(block) < 20:
+            token = lines[j].strip()
+
+            if (
+                re.fullmatch(r"\d+", token)
+                and j + 1 < len(lines)
+                and re.fullmatch(r"\d+", lines[j + 1].strip())
+            ):
+                break
+
+            if re.match(
+                r"^(Purchase Order|Grand\s+Total|RightClick|Page\s*#?)",
+                token,
+                re.IGNORECASE,
+            ):
+                break
+
+            if token:
+                block.append(token)
+
+            j += 1
+
+        # Find a plausible alphanumeric/hyphenated vendor style.
+        style = None
+        style_pos = None
+
+        for pos, token in enumerate(block):
+            if (
+                re.search(r"[A-Z]", token, re.IGNORECASE)
+                and re.search(r"\d", token)
+                and (
+                    "-" in token
+                    or re.fullmatch(r"[A-Z]{1,8}\d[A-Z0-9]*", token, re.IGNORECASE)
+                )
+            ):
+                # Prefer codes with a hyphen, since those are common Vendor
+                # Item # values.
+                if "-" in token:
+                    style = token
+                    style_pos = pos
+
+        if style is None:
+            for pos, token in enumerate(block):
+                if (
+                    re.search(r"[A-Z]", token, re.IGNORECASE)
+                    and re.search(r"\d", token)
+                ):
+                    style = token
+                    style_pos = pos
+
+        if style is None:
+            continue
+
+        memo = ""
+        for token in block:
+            m = re.search(
+                r"\bSKU\s*[:#]?\s*([A-Z0-9._/\-]+)",
+                token,
+                re.IGNORECASE,
+            )
+            if m:
+                memo = m.group(1)
+                break
+
+        description_tokens = block[:style_pos] if style_pos is not None else block
+        description = " ".join(description_tokens)
+        description = re.sub(r"\s+", " ", description).strip()
+
+        # Do not turn diamond weights into item sizes.
+        size = extract_size_from_text(description) or "1"
+
+        orders.append({
+            "base_style": style,
+            "description": description,
+            "raw_description_block": " ".join(block),
+            "size": size,
+            "qty": qty,
+            "memo": memo,
+            "dia_quality": common["dia_quality"],
+            "stamping": common["stamping"],
+            "order_number": common["order_number"],
+            "po_number": common["po_number"],
+            "po_date": common["po_date"],
+            "due_date": common["due_date"],
+        })
+
+    return orders
+
+
+def parse_pdf(pdf_path):
+    """
+    Robust VPO parser supporting multiple PDF layouts.
+
+    Strategy:
+      1. Extract all text with pdfplumber.
+      2. Extract PO-level fields independently.
+      3. Try the original/standard VPO layout.
+      4. Try the alternate "Item # / Quantity / Vendor Item #" layout.
+      5. Use a conservative generic fallback.
+      6. Return an empty list only when no credible item row exists.
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        full_text_parts = []
+
+        for page in pdf.pages:
+            text = page.extract_text(x_tolerance=2, y_tolerance=3)
+            if text:
+                full_text_parts.append(text)
+
+    full_text = "\n".join(full_text_parts)
+
+    if not full_text.strip():
+        return []
+
+    common = _extract_common_po_fields(full_text)
+    lines = _clean_pdf_lines(full_text)
+
+    # First: original layout.
+    orders = _parse_standard_vpo_layout(lines, common)
+    if orders:
+        return orders
+
+    # Second: alternate VPO layout from PDFs such as:
+    # Item # / Quantity / Vendor Item # / Cost / Amount / Description / Memo #
+    orders = _parse_alternate_vpo_layout(lines, common)
+    if orders:
+        return orders
+
+    # Third: conservative fallback.
+    orders = _fallback_generic_item_parser(lines, common)
+    return orders
+
+def load_reference_style_map():
+    try:
+        df = pd.read_excel(REFERENCE_EXCEL_PATH)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def generate_output_rows(orders, reference_df, recycled=False, order_group="", priority=""):
+    output_rows = []
+    order_group_val = (order_group or "").strip()
+
+    for idx, order in enumerate(orders, start=1):
+        metal_info = parse_metal_from_description(
+            order["description"] + " " + order.get("raw_description_block", ""),
+            recycled=recycled,
+        )
+
+        style_code, itemsize = build_style_code(
+            order["base_style"],
+            order["size"],
+            metal_info["tone_suffix"],
+            reference_df,
+            order_group=order_group_val,
+        )
+
+        if itemsize is None:
+            itemsize = format_itemsize_prefix(order["base_style"], order["size"], reference_df)
+
+        metal_full_name = f"{metal_info['karat']} {metal_info['metal_name']}"
+
+        special_remarks_parts = []
+        if order_group_val:
+            special_remarks_parts.append(order_group_val)
+        if order["memo"]:
+            special_remarks_parts.append(order["memo"])
+        special_remarks_parts.append(metal_full_name)
+        if order["dia_quality"]:
+            dq_clean = order["dia_quality"].strip()
+            dq_tokens = dq_clean.split()
+            if len(dq_tokens) >= 2:
+                dq_formatted = "-".join(dq_tokens[:2])
+                if len(dq_tokens) > 2:
+                    dq_formatted += " " + " ".join(dq_tokens[2:])
+            else:
+                dq_formatted = dq_clean
+            special_remarks_parts.append(f"DIA QLTY-{dq_formatted}")
+        special_remarks = ",".join(special_remarks_parts)
+
+        if metal_info["tone_suffix"] == "YG":
+            design_inst = "NO RHODIUM"
+        elif metal_info["tone_suffix"] == "WG":
+            design_inst = "WHITE RHODIUM"
+        else:
+            design_inst = ""
+
+        item_po_no = order["order_number"]
+        if item_po_no and str(item_po_no).isdigit():
+            item_po_no = int(item_po_no)
+
+        row = {
+            "SrNo": idx,
+            "StyleCode": style_code,
+            "ItemSize": itemsize,
+            "OrderQty": order["qty"],
+            "OrderItemPcs": order["qty"],
+            "Metal": metal_info["metal"],
+            "Tone": metal_info["tone"],
+            "ItemPoNo": item_po_no,
+            "ItemRefNo": "",
+            "StockType": "",
+            "MakeType": "",
+            "Priority": priority,
+            "CustomerProductionInstruction": order["description"],
+            "SpecialRemarks": special_remarks,
+            "DesignProductionInstruction": design_inst,
+            "StampInstruction": order["stamping"] or "",
+            "OrderGroup": order_group_val,
+            "Certificate": "",
+            "SKUNo": order["memo"] or "",
+            "Basestoneminwt": "",
+            "Basestonemaxwt": "",
+            "Basemetalminwt": "",
+            "Basemetalmaxwt": "",
+            "Productiondeliverydate": "",
+            "Expecteddeliverydate": "",
+            "BlankColumn": "",
+            "SetPrice": "",
+            "StoneQuality": "",
+            "Date": "",
+            "PoDate": order["po_date"] or "",
+            "E Del Date": order["due_date"] or "",
+        }
+        output_rows.append(row)
+
+    return output_rows
+
+
+def write_output_excel(output_rows, output_path, template_path=None):
+    if template_path and os.path.exists(template_path):
+        try:
+            wb = load_workbook(template_path)
+            if "Gati" in wb.sheetnames:
+                ws = wb["Gati"]
+            else:
+                ws = wb.active
+
+            header_cells = {}
+            for col_idx in range(1, ws.max_column + 1):
+                val = ws.cell(row=1, column=col_idx).value
+                if val is not None:
+                    header_cells[str(val).strip()] = col_idx
+
+            existing_start = 2
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+                has_data = any(cell.value is not None for cell in row)
+                if not has_data:
+                    break
+                existing_start += 1
+
+            if existing_start > 2:
+                for row_idx in range(2, existing_start):
+                    for col_idx in range(1, ws.max_column + 1):
+                        ws.cell(row=row_idx, column=col_idx, value=None)
+
+            for row_idx, row_data in enumerate(output_rows, start=2):
+                for col_name, col_idx in header_cells.items():
+                    if col_name in row_data:
+                        ws.cell(row=row_idx, column=col_idx, value=row_data[col_name])
+
+            wb.save(output_path)
+            return
+        except Exception:
+            pass
+
+    df = pd.DataFrame(output_rows)
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Gati")
+
 
 def process_bdldhi_file(
     filepath: str,
     output_dir: str,
     recycled: bool = False,
-    order_group: str = '',
-    priority: str = '-5',
+    order_group: str = "",
+    priority: str = "",
 ) -> tuple:
-    """
-    Process a Bhakti / Dharm International LLC PDF purchase order.
-    """
     try:
-        raw_text = _read_pdf_text(filepath)
-        header = _parse_header(raw_text)
+        reference_df = load_reference_style_map()
 
-        line_items, notes_text = _parse_line_items_by_position(filepath)
-
-        if not line_items:
+        orders = parse_pdf(filepath)
+        if not orders:
             return False, None, "Could not extract any line items from the PDF. Please verify the file is a valid SHIMAYRA VPO purchase order.", None
 
-        item_po_no = header.get('Order #', '')
-        po_no = header.get('P.O. #', '')
+        output_rows = generate_output_rows(
+            orders,
+            reference_df,
+            recycled=recycled,
+            order_group=order_group,
+            priority=priority,
+        )
 
-        rows = []
-        missing_styles = []
-        for sr_no, row in enumerate(line_items, start=1):
-            item_num    = str(row.get('Item #', ''))
-            size        = str(row.get('Size', '7'))
-            desc        = str(row.get('Description', ''))
-            qty         = row.get('Quantity', 1)
-            vendor_item = str(row.get('Vendor Item #', ''))
-            memo        = str(row.get('Memo #', ''))
-
-            metal      = _build_metal(desc, item_num, recycled)
-            tone       = _get_tone(metal)
-            if not metal.startswith('G'):
-                tone = 'PT' if metal.startswith('PC95') else ''
-            initial_style_code = _build_style_code(item_num, size, desc, metal)
-            base_style_no = re.sub(r'^[\d]+K[WYPR]*\s*', '', item_num.strip(), flags=re.IGNORECASE)
-            style_code = _lookup_client_style(base_style_no, size, metal)
-            
-            if not style_code:
-                missing_styles.append(f"Line {sr_no}: Style No {base_style_no}")
-            
-            base = re.sub(r'^[\d]+K[WYPR]*\s*', '', item_num.strip(), flags=re.IGNORECASE)
-            effective_size = '7' if base.upper().startswith('ZR') else size
-            
-            # First, try to lookup ItemSize from CS_100826 based on the StyleCode
-            cs_item_size = _lookup_itemsize_from_cs_100826(style_code if style_code else "")
-            if cs_item_size:
-                # Use the ItemSize from CS_100826 file
-                item_size = cs_item_size
-            else:
-                # Fallback to ItemSize_Mst with default 'UP' prefix
-                item_size = _map_item_size_from_mst(effective_size, 'UP')
-
-            # Dynamically pull the exact stamp instructions matching this specific item's size
-            stamp_instruction = _extract_stamp_instruction_for_size(notes_text, size)
-
-            rows.append({
-                'SrNo':                             sr_no,
-                'StyleCode':                     style_code if style_code else initial_style_code,
-                'ItemSize':                      item_size,
-                'OrderQty':                      qty,
-                'OrderItemPcs':                  1,
-                'Metal':                         metal,
-                'Tone':                          tone,
-                'ItemPoNo':                      item_po_no,
-                'ItemRefNo':                     '',
-                'StockType':                     '',
-                'Priority':                      priority,
-                'MakeType':                      '',
-                'CustomerProductionInstruction': f"{vendor_item} {desc}".strip(),
-                'SpecialRemarks':                 _build_special_remark(order_group, memo, metal),
-                'DesignProductionInstruction':   'WHITE RHODIUM' if tone == 'W' else 'NO RHODIUM',
-                'StampInstruction':              stamp_instruction,
-                'OrderGroup':                    order_group,
-                'PO. No.':                       po_no,
-                'Certificate':                   '',
-                'SKUNo':                         memo,
-                'Basestoneminwt':                '',
-                'Basestonemaxwt':                '',
-                'Basemetalminwt':                '',
-                'Basemetalmaxwt':                '',
-                'Productiondeliverydate':        '',
-                'Expecteddeliverydate':          '',
-                'SetPrice':                      '',
-                'StoneQuality':                  '',
-            })
-        
-        if missing_styles:
-            error_msg = "Client style not present for: " + "; ".join(missing_styles)
-            return False, None, error_msg, None
-
-        df = pd.DataFrame(rows)
-
-        base_name = re.sub(r'[^\w\-]', '_', os.path.splitext(os.path.basename(filepath))[0])
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        base_name = re.sub(r"[^\w\-]", "_", os.path.splitext(os.path.basename(filepath))[0])
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"BDLDHI_{base_name}_{timestamp}.xlsx"
         output_path = os.path.join(output_dir, output_filename)
-        df.to_excel(output_path, index=False)
 
-        return True, output_path, None, df
+        write_output_excel(output_rows, output_path)
+
+        return True, output_path, None, pd.DataFrame(output_rows)
 
     except Exception as exc:
         return False, None, str(exc), None

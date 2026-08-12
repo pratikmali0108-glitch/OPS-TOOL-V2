@@ -6,6 +6,53 @@ import glob
 from pathlib import Path
 
 
+BDL_DHI_CS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "CS_100826",
+    "DHI_CS_100826.xlsx"
+)
+
+_BDL_DHI_CS_DF = None
+
+
+def _get_bdl_dhi_cs_df():
+    global _BDL_DHI_CS_DF
+    if _BDL_DHI_CS_DF is not None:
+        return _BDL_DHI_CS_DF
+    try:
+        if os.path.exists(BDL_DHI_CS_PATH):
+            df = pd.read_excel(BDL_DHI_CS_PATH, dtype=str)
+            df.columns = [str(c).strip() for c in df.columns]
+            _BDL_DHI_CS_DF = df
+        else:
+            _BDL_DHI_CS_DF = pd.DataFrame()
+    except Exception:
+        _BDL_DHI_CS_DF = pd.DataFrame()
+    return _BDL_DHI_CS_DF
+
+
+def _derive_prefix_from_cs(style_code_base):
+    df = _get_bdl_dhi_cs_df()
+    if df.empty or "Style No" not in df.columns or "ItemSize" not in df.columns:
+        return None
+    base = str(style_code_base).strip()
+    if not base or base.upper() == "NAN":
+        return None
+    matches = df[df["Style No"].astype(str).str.strip() == base]
+    if matches.empty:
+        return None
+    valid_items = matches["ItemSize"].dropna()
+    if valid_items.empty:
+        return None
+    first_val = str(valid_items.iloc[0]).strip()
+    if not first_val:
+        return None
+    m = re.match(r"^\s*([A-Za-z]+)", first_val)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
 def _build_style_code(base, item_size, tone):
     """
     Build StyleCode as '<base>-<size_numeric><tone>G' (or PT for platinum).
@@ -274,20 +321,29 @@ def process_bhakti_dharm_file(input_file_path, output_folder=None, item_po_no=No
         df.loc[mask, 'ItemSize'] = df.loc[mask, 'ExtractedSize']
         df.drop(columns=['ExtractedSize'], inplace=True)
 
-        def format_item_size(size):
-            """Format numeric ItemSize with user-defined prefix (US/UP/TS)."""
+        def get_prefix_for_style(style_val):
+            if size_prefix:
+                return str(size_prefix).strip().upper() or "US"
+            derived = _derive_prefix_from_cs(style_val)
+            return derived if derived else "US"
+
+        def format_item_size(row):
+            """Format numeric ItemSize with auto-derived or fallback prefix."""
+            size = row['ItemSize']
             if pd.isna(size):
                 return size
             size_str = str(size).strip().upper()
             if re.fullmatch(r'\d+(\.\d+)?', size_str):
+                prefix = get_prefix_for_style(row['StyleCode'])
                 if '.' in size_str:
-                    size_str = size_str.replace('.', '')
-                elif len(size_str) == 1:
-                    size_str = '0' + size_str
-                return f"{size_prefix}{size_str}"
+                    int_part, dec_part = size_str.split('.', 1)
+                    size_num = f"{int(int_part):02d}{dec_part}"
+                else:
+                    size_num = f"{int(size_str):02d}"
+                return f"{prefix}{size_num}"
             return size_str
 
-        df['ItemSize'] = df['ItemSize'].apply(format_item_size)
+        df['ItemSize'] = df.apply(format_item_size, axis=1)
 
         # Build full StyleCode: base-sizeWG / base-sizePT etc.
         df['ItemSize'] = df['ItemSize'].apply(_map_item_size)

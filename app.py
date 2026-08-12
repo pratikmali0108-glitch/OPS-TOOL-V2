@@ -21,7 +21,6 @@ from uneek import process_uneek_file
 from JU import process_ju_excel_file
 # New customer modules
 from AAM import process_aam_file
-from Bhakti_Dharam import process_bhakti_dharm_file
 from BDLDHI import process_bdldhi_file
 from DCT import process_dct_file
 from MOR import process_mor_file
@@ -595,7 +594,7 @@ def aam_add_style():
 
 @app.route('/bhakti_dharam')
 def bhakti_dharam_tool():
-    return render_template('index_bhakti_dharam.html', cs_count=_get_cs_count('Bhakti'))
+    return redirect(url_for('bdldhi_tool'))
 
 @app.route('/bhakti-add-style', methods=['POST'])
 def bhakti_add_style():
@@ -1572,24 +1571,6 @@ def process_aam():
         return process_aam_file(path, out_dir, priority_value=priority)
     
     return _handle_generic_processing(request, 'index_aam.html', _proc, 'xlsx', 'AAM')
-
-
-@app.route('/process-bhakti_dharam', methods=['POST'])
-def process_bhakti_dharam():
-    item_po_no = (request.form.get('item_po_no') or '').strip()
-    stamp_instruction = (request.form.get('stamp_instruction') or '').strip()
-    order_group = (request.form.get('order_group') or '').strip()
-    priority = (request.form.get('priority') or '5 day').strip()
-    po_no = (request.form.get('po_no') or '').strip()
-    size_prefix = (request.form.get('size_prefix') or 'US').strip()
-
-    def _proc(path, out_dir):
-        return process_bhakti_dharm_file(path, out_dir, item_po_no=item_po_no,
-                                         stamp_instruction=stamp_instruction,
-                                         order_group=order_group, priority_value=priority,
-                                         po_no_value=po_no, size_prefix=size_prefix)
-
-    return _handle_generic_processing(request, 'index_bhakti_dharam.html', _proc, 'xlsx', 'Bhakti & Dharam')
 
 
 @app.route('/process-bdldhi', methods=['POST'])
