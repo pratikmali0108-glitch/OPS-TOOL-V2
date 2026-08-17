@@ -62,6 +62,68 @@
             </ul>
         {% endif %}
 
+        <!-- Data Preview Table -->
+        {% if preview_data %}
+        <div class="mt-4">
+            <h5 class="mb-3">
+                <i class="bi bi-table"></i> Data Preview
+                <span class="badge bg-info">{{ preview_data.row_count }} rows</span>
+            </h5>
+            
+            {% if preview_data.sheet1 %}
+            <div class="mb-4">
+                <h6 class="text-muted mb-2">Sheet 1 - PO Details</h6>
+                <div class="table-responsive" style="max-height: 200px; overflow-y: auto;">
+                    <table class="table table-sm table-bordered table-hover">
+                        <tbody>
+                            {% for row in preview_data.sheet1 %}
+                            <tr>
+                                {% for cell in row %}
+                                <td class="{% if loop.first or loop.index == 2 %}fw-bold{% endif %}">
+                                    {{ cell if cell else '' }}
+                                </td>
+                                {% endfor %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if preview_data.sheet2 %}
+            <div class="mb-3">
+                <h6 class="text-muted mb-2">Sheet 2 - Items Data</h6>
+                <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                    <table class="table table-sm table-bordered table-striped table-hover">
+                        <thead class="table-dark sticky-top">
+                            <tr>
+                                {% for header in preview_data.sheet2_headers %}
+                                <th class="text-nowrap" style="min-width: 100px;">{{ header }}</th>
+                                {% endfor %}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in preview_data.sheet2 %}
+                            <tr>
+                                {% for cell in row %}
+                                <td>{{ cell if cell else '' }}</td>
+                                {% endfor %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% if preview_data.truncated %}
+                <p class="text-muted small mb-0">
+                    <i class="bi bi-info-circle"></i> Showing first 20 rows. Download the file to see all data.
+                </p>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
         <hr class="my-4">
 
         <!-- New Client Style Code section -->

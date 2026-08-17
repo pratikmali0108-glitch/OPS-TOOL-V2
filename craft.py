@@ -477,16 +477,16 @@ def parse_purchase_order_data(full_text, size_prefix: str = "US", default_priori
 
         if formatted_size and not is_earring:
             special_remarks = (
-                f"BRILLIANT EARTH CRAFT,{order_code}, {style_code},{vendor_style}, "
+                f"BRILLIANT EARTH CRAFT,{order_code},{vendor_style}, "
                 f"{sku_no},SZ-{formatted_size}, {metal_kt} {tone_full.upper()},COC CERTIFIED RE-CYCLE GOLD"
             )
         else:
             special_remarks = (
-                f"BRILLIANT EARTH CRAFT,{order_code}, {style_code},{vendor_style}, "
+                f"BRILLIANT EARTH CRAFT,{order_code}, {vendor_style}, "
                 f"{sku_no}, {metal_kt} {tone_full.upper()},COC CERTIFIED RE-CYCLE GOLD"
             )
 
-        design_prod_instr = "White Rodium" if tone == "W" else "No Rodium"
+        design_prod_instr = "White Rhodium" if tone == "W" else "No Rhodium"
         item_ref_no = str(vendor_style).strip() if vendor_style else ""
 
         data.append({

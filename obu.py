@@ -177,7 +177,7 @@ def _get_obu_cs():
         cs_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "CS_220526",
-            "OBU_CS.xlsx"
+            "OBU_CS_2.xlsx"
         )
 
         if os.path.exists(cs_path):
@@ -203,6 +203,45 @@ def _get_obu_cs():
     return _OBU_CS_CACHE
 
 
+def _get_customer_instruction(style_code: str) -> str:
+    """
+    Lookup CustomerProductionInstruction from OBU_CS_2.xlsx
+    using Style No.
+    """
+    df = _get_obu_cs()
+
+    if df.empty or not style_code:
+        return ""
+
+    # Normalize column names
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Find required columns (ignore extra spaces/case)
+    client_col = next(
+        (c for c in df.columns if c.strip().lower() == "Style No"),
+        None
+    )
+    instr_col = next(
+        (c for c in df.columns if c.strip().lower() == "customerproductioninstruction"),
+        None
+    )
+
+    if not client_col or not instr_col:
+        return ""
+
+    match = df[
+        df[client_col]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        == style_code.strip().upper()
+    ]
+
+    if match.empty:
+        return ""
+
+    return str(match.iloc[0][instr_col]).strip()
 # ============================================================
 # METAL MATCHING
 # ============================================================
@@ -244,7 +283,7 @@ def _find_reference_in_obu_cs(reference):
 
     Checks:
         - Style No
-        - Client Style No
+        - Style No
         - Style Alias No
 
     Returns:
@@ -297,21 +336,21 @@ def _find_reference_in_obu_cs(reference):
             )
 
             client_style = (
-                str(row['Client Style No']).strip()
-                if 'Client Style No' in df.columns
+                str(row['Style No']).strip()
+                if 'Style No' in df.columns
                 else None
             )
 
             return style_no, client_style
 
     # --------------------------------------------------------
-    # Check Client Style No
+    # Check Style No
     # --------------------------------------------------------
 
-    if 'Client Style No' in df.columns:
+    if 'Style No' in df.columns:
 
         matches = df[
-            df['Client Style No']
+            df['Style No']
             .fillna('')
             .astype(str)
             .str.strip()
@@ -330,8 +369,8 @@ def _find_reference_in_obu_cs(reference):
             )
 
             client_style = (
-                str(row['Client Style No']).strip()
-                if 'Client Style No' in df.columns
+                str(row['Style No']).strip()
+                if 'Style No' in df.columns
                 else reference
             )
 
@@ -363,8 +402,8 @@ def _find_reference_in_obu_cs(reference):
             )
 
             client_style = (
-                str(row['Client Style No']).strip()
-                if 'Client Style No' in df.columns
+                str(row['Style No']).strip()
+                if 'Style No' in df.columns
                 else None
             )
 
@@ -473,7 +512,7 @@ def _lookup_obu_cs(
     reference_text: str = ""
 ):
     """
-    Look up Client Style No, Base Metal and ItemSize from OBU_CS.xlsx.
+    Look up Style No, Base Metal and ItemSize from OBU_CS.xlsx.
 
     Priority:
 
@@ -517,8 +556,8 @@ def _lookup_obu_cs(
             row = alias_filtered.iloc[0]
 
             client_style = (
-                str(row['Client Style No']).strip()
-                if 'Client Style No' in df.columns
+                str(row['Style No']).strip()
+                if 'Style No' in df.columns
                 else None
             )
 
@@ -618,8 +657,8 @@ def _lookup_obu_cs(
                     row = candidates.iloc[0]
 
                     client_style = (
-                        str(row['Client Style No']).strip()
-                        if 'Client Style No' in df.columns
+                        str(row['Style No']).strip()
+                        if 'Style No' in df.columns
                         else None
                     )
 
@@ -649,13 +688,13 @@ def _lookup_obu_cs(
                     )
 
             # ------------------------------------------------
-            # Exact Client Style No match
+            # Exact Style No match
             # ------------------------------------------------
 
-            if 'Client Style No' in df.columns:
+            if 'Style No' in df.columns:
 
                 filtered = df[
-                    df['Client Style No']
+                    df['Style No']
                     .fillna('')
                     .astype(str)
                     .str.strip()
@@ -668,7 +707,7 @@ def _lookup_obu_cs(
                     row = filtered.iloc[0]
 
                     client_style = (
-                        str(row['Client Style No']).strip()
+                        str(row['Style No']).strip()
                     )
 
                     base_metal = (
@@ -769,8 +808,8 @@ def _lookup_obu_cs(
         return None, None, None, None
 
     client_style = (
-        str(matched_row['Client Style No']).strip()
-        if 'Client Style No' in df.columns
+        str(matched_row['Style No']).strip()
+        if 'Style No' in df.columns
         else None
     )
 
@@ -1250,7 +1289,7 @@ def _infer_style_suffix_pattern(style_no):
         suffixes = []
 
         for val in rows.get(
-            'Client Style No',
+            'Style No',
             pd.Series(dtype=str)
         ).dropna():
 
@@ -1992,15 +2031,14 @@ def process_obu_file(
                 # ---------------------------------------------
 
                 desc_lines = []
+                found_second_description = False
 
                 for ln in block:
 
+                    # Skip article headers, quantity lines, and "Your reference"
                     if (
                         article_header_re.match(ln)
                         or quantity_line_re.match(ln)
-                        or ln.lower().startswith(
-                            'description'
-                        )
                         or re.match(
                             r'^Your reference',
                             ln,
@@ -2009,13 +2047,40 @@ def process_obu_file(
                     ):
                         continue
 
+                    # Check if this line contains "Description Description"
+                    # This indicates the second occurrence
+                    if re.search(r'\bDescription\s+Description\b', ln, re.IGNORECASE):
+                        found_second_description = True
+                        continue
+
                     # Skip pure reference/code lines
                     if code_token_re.fullmatch(
                         ln.replace(' ', '')
                     ):
                         continue
 
-                    desc_lines.append(ln)
+                    # Only collect lines after we've found "Description Description"
+                    if found_second_description:
+                        # The PDF has duplicated content on each line
+                        # Pattern: "First part Second part with continuation"
+                        # We need to find where the repetition occurs and extract the second part
+                        
+                        # Try to find the longest repeated substring at the start
+                        line_len = len(ln)
+                        
+                        # Start from middle and work backwards to find where duplication starts
+                        for split_pos in range(line_len // 2, line_len):
+                            first_part = ln[:split_pos].strip()
+                            remaining = ln[split_pos:].strip()
+                            
+                            # Check if remaining text starts with the same content as first_part
+                            if remaining.startswith(first_part):
+                                # Found the split point - take everything from split_pos onwards
+                                desc_lines.append(remaining)
+                                break
+                        else:
+                            # No duplication found, add the whole line
+                            desc_lines.append(ln)
 
                 full_desc = ' '.join(
                     desc_lines
@@ -2049,33 +2114,17 @@ def process_obu_file(
                     flags=re.IGNORECASE
                 )
 
+               
+
                 if split_match:
-
-                    customer_instr = (
-                        full_desc[
-                            :split_match.start()
-                        ].strip()
-                    )
-
-                    stamp_instr = (
-                        full_desc[
-                            split_match.start():
-                        ].strip()
-                    )
-
+                    customer_instr = full_desc[:split_match.start()].strip()
+                    stamp_instr = full_desc[split_match.start():].strip()
                 else:
-
-                    customer_instr = full_desc
-
+                    customer_instr = full_desc.strip()
                     stamp_instr = ''
 
-                customer_instr = re.sub(
-                    r'\s*\band\s*$',
-                    '',
-                    customer_instr,
-                    flags=re.IGNORECASE
-                ).strip()
-
+                # Clean up trailing 'and' case-insensitively
+                customer_instr = re.sub(r'\s*\band\b\s*$', '', customer_instr, flags=re.IGNORECASE).strip()
                 # ---------------------------------------------
                 # CERTIFICATE
                 # ---------------------------------------------
@@ -2214,7 +2263,7 @@ def process_obu_file(
                 # BR0000367S-6.9INWG
                 #
                 # rather than potentially returning an already
-                # stored/old Client Style No.
+                # stored/old Style No.
                 #
                 # The BR style is used as the base and the
                 # current PDF size + tone are appended.
@@ -2300,10 +2349,32 @@ def process_obu_file(
                     flags=re.IGNORECASE
                 )
 
+                if tone == 'W':
+                    dsp = 'RHODIUM'
+                else:
+                    dsp = 'NO RHODIUM'
                 # ---------------------------------------------
                 # ADD ITEM
                 # ---------------------------------------------
-
+                if '585' in stamp_instr:
+                    met = ' 585 '
+                elif '14KW' or '14KY' in stamp_instr:
+                    met = '14K '  
+                else:
+                    met = metal
+                
+                if tone == 'Y':
+                    tone1 = 'YELLOW '
+                elif tone =='W':
+                    tone1 = 'WHITE '
+                else:
+                    tone1 = tone
+                if final_item_size == 'nan':
+                    size1 = ''
+                else:
+                    size1 = ',sz: ' + final_item_size +' ,'
+                
+                special_remarks = sku_no +  size1 + met +tone1+ ' GOLD' +' DIA QLTY: VVS+'
                 items.append({
 
                     'SrNo':
@@ -2346,10 +2417,10 @@ def process_obu_file(
                         customer_instr,
 
                     'SpecialRemarks':
-                        '',
+                        special_remarks,
 
                     'DesignProductionInstruction':
-                        '',
+                        dsp,
 
                     'StampInstruction':
                         stamp_instr,

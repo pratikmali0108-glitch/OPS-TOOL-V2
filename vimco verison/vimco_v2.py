@@ -262,7 +262,7 @@ def _parse_line_items_by_position(pdf_path: str):
 #  VIMCO LOGIC (FROM VIMCO.py)
 # ─────────────────────────────────────────────
 
-def _build_style_code(base, item_size, tone, cpi="", has_inch=False, is_mounting_po=False):
+def _build_style_code(base, item_size, tone, cpi="", has_inch=False):
     base = str(base).strip() if base else ''
     item_size = str(item_size).strip() if item_size else ''
     tone = str(tone).strip().upper() if tone else ''
@@ -305,14 +305,6 @@ def _build_style_code(base, item_size, tone, cpi="", has_inch=False, is_mounting
     # Append SM suffix if Customer Production Instruction contains "SEMI MOUNT" or "SEMI-"
     if "SEMI MOUNT" in cpi or "SEMI-" in cpi or "SEMI" in cpi:
         suffix = f"{suffix}SM"
-
-    # Append CB suffix if Customer Production Instruction contains "BRWN" (Brown)
-    if "BRWN" in cpi:
-        suffix = f"{suffix}CB"
-
-    # Append M suffix if this is a mounting PO
-    if is_mounting_po:
-        suffix = f"{suffix}M"
 
     return f"{base}-{suffix}" if suffix else base
 
@@ -444,7 +436,7 @@ def extract_size_from_sku(sku):
     return None
 
 
-def process_vimco_v2_file(filepath: str, output_dir: str, order_group: str = '', priority: str = '5 day', is_mounting_po: bool = False) -> tuple:
+def process_vimco_v2_file(filepath: str, output_dir: str, order_group: str = '', priority: str = '5 day') -> tuple:
     try:
         raw_text = _read_pdf_text(filepath)
         header = _parse_header(raw_text)
@@ -541,8 +533,7 @@ def process_vimco_v2_file(filepath: str, output_dir: str, order_group: str = '',
                 row['StyleCode'], row['ItemSize'],
                 'TT' if row.get('_is_tt') else ('AG' if str(row.get('Metal', '')).upper() == 'AG925' else str(row['Tone'])),
                 row['CustomerProductionInstruction'],
-                row.get('_has_inch', False),
-                is_mounting_po
+                row.get('_has_inch', False)
             ), axis=1
         )
 

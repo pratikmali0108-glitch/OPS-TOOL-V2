@@ -29,6 +29,7 @@ from PC2 import process_pc2_file
 from PCB import process_pcb_file
 from SGI import process_sgi_file
 from vimco_v2 import process_vimco_v2_file
+from AMP import process_amp_file
 from gati_excel_output import enhance_xlsx_with_template, write_gati_excel
 # SKU Extractor modules
 import re
@@ -592,6 +593,14 @@ def aam_tool():
 def aam_add_style():
     return _handle_add_style('AAM', 'index_aam.html', 'aam_add_style')
 
+@app.route('/amp')
+def amp_tool():
+    return render_template('index_amp.html', cs_count=_get_cs_count('AMP'))
+
+@app.route('/amp-add-style', methods=['POST'])
+def amp_add_style():
+    return _handle_add_style('AMP', 'index_amp.html', 'amp_add_style')
+
 @app.route('/bhakti_dharam')
 def bhakti_dharam_tool():
     return redirect(url_for('bdldhi_tool'))
@@ -668,65 +677,99 @@ def vimco_tool():
 def vimco_add_style():
     return _handle_add_style('VIMCO', 'index_vimco.html', 'vimco_add_style')
 
-@app.route('/process-omj', methods=['POST'])
+@app.route("/process-omj", methods=["POST"])
 def process_omj():
     try:
-        # Support both single file ('file') and multiple files ('files')
-        if 'files' in request.files:
-            files = request.files.getlist('files')
-            files = [f for f in files if f.filename != '']  # Filter empty files
-        elif 'file' in request.files:
-            file = request.files['file']
-            files = [file] if file.filename != '' else []
+        # 1. Extract form inputs (item_po_no and processing options)
+        item_po_no = request.form.get("item_po_no", "").strip()
+        process_separately = request.form.get("separate") == "true"
+
+        # 2. Support both single file ('file') and multiple files ('files')
+        if "files" in request.files:
+            files = request.files.getlist("files")
+            files = [f for f in files if f.filename != ""]  # Filter empty files
+        elif "file" in request.files:
+            file = request.files["file"]
+            files = [file] if file.filename != "" else []
         else:
-            return render_template('index_omj.html', error='No file selected')
-        
+            return render_template("index_omj.html", error="No file selected")
+
         if not files:
-            return render_template('index_omj.html', error='No file selected')
-        
-        # Check if separate processing is requested
-        process_separately = request.form.get('separate') == 'true'
-        
-        # Save uploaded files
+            return render_template("index_omj.html", error="No file selected")
+
+        if not item_po_no:
+            return render_template(
+                "index_omj.html", error="ItemPoNo is required"
+            )
+
+        # 3. Save uploaded files locally
         valid_files = []
         for file in files:
             if file and allowed_file(file.filename):
                 filename = secure_filename(file.filename)
-                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
                 file.save(filepath)
                 valid_files.append(filepath)
-        
+
         if not valid_files:
-            return render_template('index_omj.html', error='No valid Excel files found')
-        
+            return render_template(
+                "index_omj.html", error="No valid Excel files found"
+            )
+
+        # 4. Resolve constant master CS file path
+        master_filepath = _get_cs_path("OMJ")
+        if not master_filepath or not os.path.exists(master_filepath):
+            return render_template(
+                "index_omj.html",
+                error="OMJ master file not found. Expected CS_100826/OMJ_CS_1408.xlsx",
+            )
+
         try:
             download_urls = []
             all_dataframes = []
             combined_output_filename = None
-            
+
             if process_separately or len(valid_files) == 1:
                 # Process each file separately
                 for filepath in valid_files:
-                    success, output_path, error, df = process_omj_file(filepath, app.config['UPLOAD_FOLDER'])
-                    
+                    success, output_path, error, df = process_omj_file(
+                        input_filepath=filepath,
+                        output_folder=app.config["UPLOAD_FOLDER"],
+                        master_filepath=master_filepath,
+                        item_po_no=item_po_no,
+                    )
+
                     if success:
                         output_filename = os.path.basename(output_path)
                         download_urls.append({
-                            'url': url_for('download_file', filename=output_filename),
-                            'filename': output_filename,
-                            'rows': len(df) if df is not None else 0
+                            "url": url_for(
+                                "download_file", filename=output_filename
+                            ),
+                            "filename": output_filename,
+                            "rows": len(df) if df is not None else 0,
                         })
                         if df is not None:
                             all_dataframes.append(df)
                     else:
-                        return render_template('index_omj.html', 
-                                             error=f'Error processing {os.path.basename(filepath)}: {error}')
-                
-                success_msg = f'Successfully processed {len(valid_files)} file(s)!' if len(valid_files) > 1 else 'File processed successfully!'
+                        return render_template(
+                            "index_omj.html",
+                            error=f"Error processing {os.path.basename(filepath)}: {error}",
+                        )
+
+                success_msg = (
+                    f"Successfully processed {len(valid_files)} file(s)!"
+                    if len(valid_files) > 1
+                    else "File processed successfully!"
+                )
             else:
-                # Combine all files
+                # Process and combine all files
                 for filepath in valid_files:
-                    success, output_path, error, df = process_omj_file(filepath, app.config['UPLOAD_FOLDER'])
+                    success, output_path, error, df = process_omj_file(
+                        input_filepath=filepath,
+                        output_folder=app.config["UPLOAD_FOLDER"],
+                        master_filepath=master_filepath,
+                        item_po_no=item_po_no,
+                    )
                     if success and df is not None:
                         all_dataframes.append(df)
                     else:
@@ -736,62 +779,90 @@ def process_omj():
                                 os.remove(fp)
                             except:
                                 pass
-                        return render_template('index_omj.html', 
-                                             error=f'Error processing {os.path.basename(filepath)}: {error}')
-                
+                        return render_template(
+                            "index_omj.html",
+                            error=f"Error processing {os.path.basename(filepath)}: {error}",
+                        )
+
                 # Combine all dataframes
                 import pandas as pd
+
                 combined_df = pd.concat(all_dataframes, ignore_index=True)
-                
+
                 # Generate combined output filename
-                combined_output_filename = 'OMJ_CASTING_PO_Cleaned_Combined.csv'
-                output_path = os.path.join(app.config['UPLOAD_FOLDER'], combined_output_filename)
+                combined_output_filename = "OMJ_CASTING_PO_Cleaned_Combined.csv"
+                output_path = os.path.join(
+                    app.config["UPLOAD_FOLDER"], combined_output_filename
+                )
                 combined_df.to_csv(output_path, index=False)
-                
+
                 download_urls.append({
-                    'url': url_for('download_file', filename=combined_output_filename),
-                    'filename': combined_output_filename,
-                    'rows': len(combined_df)
+                    "url": url_for(
+                        "download_file", filename=combined_output_filename
+                    ),
+                    "filename": combined_output_filename,
+                    "rows": len(combined_df),
                 })
                 all_dataframes = [combined_df]
-                
-                success_msg = f'Successfully processed and combined {len(valid_files)} file(s)!'
-            
+
+                success_msg = f"Successfully processed and combined {len(valid_files)} file(s)!"
+
             # Clean up input files
             for filepath in valid_files:
                 try:
                     os.remove(filepath)
                 except:
                     pass
-            
+
             # Check for missing style codes
             missing_style_codes = []
-            if "OMJ" in CUSTOMER_CS_CONFIG:
-                cs_filename = CUSTOMER_CS_CONFIG["OMJ"]
-                cs_list = _load_client_style_list(cs_filename)
-                missing_style_codes = _check_missing_style_codes(all_dataframes, cs_list)
-            
+            cs_path = _get_cs_path("OMJ")
+            if cs_path and os.path.exists(cs_path):
+                try:
+                    df_cs = pd.read_excel(cs_path)
+                    if "Client Style No" in df_cs.columns:
+                        cs_list = [
+                            str(v).strip()
+                            for v in df_cs["Client Style No"].dropna()
+                            if str(v).strip()
+                            and str(v).strip().upper() != "NAN"
+                        ]
+                        missing_style_codes = _check_missing_style_codes(
+                            all_dataframes, cs_list
+                        )
+                except Exception:
+                    pass
+
             # Record processing stats
-            record_processing('OMJ', len(valid_files), sum(len(df) for df in all_dataframes))
-            
+            record_processing(
+                "OMJ",
+                len(valid_files),
+                sum(len(df) for df in all_dataframes),
+            )
+
             # Prepare template variables
             template_vars = {
-                'success': success_msg,
-                'cs_count': _get_cs_count('OMJ'),
+                "success": success_msg,
+                "cs_count": _get_cs_count("OMJ"),
             }
             if process_separately or len(valid_files) == 1:
                 if len(download_urls) > 1:
-                    template_vars['download_urls'] = download_urls
+                    template_vars["download_urls"] = download_urls
                 else:
-                    template_vars['download_url'] = download_urls[0]['url']
+                    template_vars["download_url"] = download_urls[0]["url"]
             else:
-                template_vars['download_url'] = url_for('download_file', filename=combined_output_filename)
+                template_vars["download_url"] = url_for(
+                    "download_file", filename=combined_output_filename
+                )
 
             if missing_style_codes:
-                template_vars['error'] = f'client style master not created for the style(s): {", ".join(missing_style_codes)}'
+                template_vars["error"] = (
+                    "client style master not created for the style(s):"
+                    f" {', '.join(missing_style_codes)}"
+                )
 
-            return render_template('index_omj.html', **template_vars)
-        
+            return render_template("index_omj.html", **template_vars)
+
         except Exception as proc_error:
             # Clean up input files on processing error
             for filepath in valid_files:
@@ -800,9 +871,11 @@ def process_omj():
                 except:
                     pass
             raise proc_error
-    
+
     except Exception as e:
-        return render_template('index_omj.html', error=f'Error processing file: {str(e)}')
+        return render_template(
+            "index_omj.html", error=f"Error processing file: {str(e)}"
+        )
 
 @app.route('/process-shefi', methods=['POST'])
 def process_shefi():
@@ -1153,7 +1226,7 @@ def _is_style_code_valid(built_code: str, cs_list: list, exact_only: bool = Fals
 
 # Customer configuration: maps customer key (used in routes/templates) to CS filename
 CUSTOMER_CS_CONFIG = {
-    "OMJ": "OMJ_CS.xlsx",
+    "OMJ": "OMJ_CS_1408.xlsx",
     "SHEFI": "SHEFI_CS.xlsx",
     "Ambition": "Ambition_CS.xlsx",
     "Craft": "CRAFT_CS.xlsx",
@@ -1166,6 +1239,7 @@ CUSTOMER_CS_CONFIG = {
     "UNEEK": "UNEEK_CS.xlsx",
     "JU": "JU_CS.xlsx",
     "AAM": "AAM_CS.xlsx",
+    "AMP": "AMP_CS_120826.xlsx",
     "Bhakti": "DHI_CS.xlsx",
     "Bhakti & Dharam": "DHI_CS.xlsx",
     "Bhakti Diamond LLC": "DHI_CS.xlsx",
@@ -1185,6 +1259,10 @@ def _get_cs_path(customer_key):
     if customer_key not in CUSTOMER_CS_CONFIG:
         return None
     filename = CUSTOMER_CS_CONFIG[customer_key]
+    # Check CS_100826 directory first (for AMP and newer files)
+    cs_100826_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'CS_100826', filename)
+    if os.path.exists(cs_100826_path):
+        return cs_100826_path
     # Check if CS file is in CS_220526 directory (for most customers) or root (for Ambition)
     cs_220526_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'CS_220526', filename)
     if os.path.exists(cs_220526_path):
@@ -1502,7 +1580,172 @@ def process_obu():
         if df is not None and not df.empty and 'CustomerProductionInstruction' in df.columns:
             return str(df.iloc[0]['CustomerProductionInstruction']).strip()
         return None
-    return _handle_generic_processing(request, 'index_obu.html', process_obu_file, 'xlsx', 'OBU', get_csd_remarks=_get_obu_csd_remarks)
+    
+    def _extract_preview_data(output_path):
+        """Extract preview data from the generated Excel file for OBU"""
+        try:
+            # Read the generated Excel file
+            df_sheet1 = pd.read_excel(output_path, sheet_name='Sheet1', header=None)
+            df_sheet2 = pd.read_excel(output_path, sheet_name='Sheet2')
+            
+            # Extract first 5 rows from Sheet1 (PO Details)
+            sheet1_data = []
+            for idx, row in df_sheet1.head(5).iterrows():
+                sheet1_data.append([str(val) if pd.notna(val) else '' for val in row])
+            
+            # Extract first 20 rows from Sheet2 (Items Data)
+            sheet2_data = []
+            sheet2_headers = list(df_sheet2.columns)
+            for idx, row in df_sheet2.head(20).iterrows():
+                sheet2_data.append([str(val) if pd.notna(val) else '' for val in row])
+            
+            return {
+                'row_count': len(df_sheet2),
+                'sheet1': sheet1_data,
+                'sheet2': sheet2_data,
+                'sheet2_headers': sheet2_headers,
+                'truncated': len(df_sheet2) > 20
+            }
+        except Exception:
+            return None
+    
+    # Custom implementation for OBU with preview data
+    try:
+        if 'files' in request.files:
+            files = request.files.getlist('files')
+            files = [f for f in files if f.filename != '']
+        elif 'file' in request.files:
+            file = request.files['file']
+            files = [file] if file.filename != '' else []
+        else:
+            return render_template('index_obu.html', error='No file selected', cs_count=_get_cs_count('OBU'))
+
+        if not files:
+            return render_template('index_obu.html', error='No file selected', cs_count=_get_cs_count('OBU'))
+
+        process_separately = request.form.get('separate') == 'true'
+
+        valid_files = []
+        for file in files:
+            if file and allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(filepath)
+                valid_files.append(filepath)
+
+        if not valid_files:
+            return render_template('index_obu.html', error='No valid files found', cs_count=_get_cs_count('OBU'))
+
+        try:
+            download_urls = []
+            all_dataframes = []
+            preview_data = None
+            
+            if process_separately or len(valid_files) == 1:
+                for filepath in valid_files:
+                    success, output_path, error_msg, df = process_obu_file(filepath, app.config['UPLOAD_FOLDER'])
+                    if success:
+                        csd_remarks = _get_obu_csd_remarks(df)
+                        _apply_gati_template(output_path, csd_remarks=csd_remarks)
+                        output_filename = os.path.basename(output_path)
+                        download_urls.append({
+                            'url': url_for('download_file', filename=output_filename),
+                            'filename': output_filename,
+                            'rows': len(df) if df is not None else 0
+                        })
+                        if df is not None:
+                            all_dataframes.append(df)
+                        # Extract preview from first file
+                        if preview_data is None:
+                            preview_data = _extract_preview_data(output_path)
+                    else:
+                        return render_template('index_obu.html', 
+                                             error=f'Error processing {os.path.basename(filepath)}: {error_msg}',
+                                             cs_count=_get_cs_count('OBU'))
+            else:
+                for filepath in valid_files:
+                    success, output_path, error_msg, df = process_obu_file(filepath, app.config['UPLOAD_FOLDER'])
+                    if success and df is not None:
+                        all_dataframes.append(df)
+                    else:
+                        for fp in valid_files:
+                            try:
+                                os.remove(fp)
+                            except:
+                                pass
+                        return render_template('index_obu.html', 
+                                             error=f'Error processing {os.path.basename(filepath)}: {error_msg}',
+                                             cs_count=_get_cs_count('OBU'))
+
+                if not all_dataframes:
+                    for fp in valid_files:
+                        try:
+                            os.remove(fp)
+                        except:
+                            pass
+                    return render_template('index_obu.html', error='No dataframes produced to combine',
+                                         cs_count=_get_cs_count('OBU'))
+
+                combined_df = pd.concat(all_dataframes, ignore_index=True)
+                combined_output_filename = 'OBU_combined_output.xlsx'
+                output_path = os.path.join(app.config['UPLOAD_FOLDER'], combined_output_filename)
+                csd_remarks = _get_obu_csd_remarks(combined_df)
+                write_gati_excel(combined_df, output_path, csd_remarks=csd_remarks)
+                
+                download_urls.append({
+                    'url': url_for('download_file', filename=combined_output_filename),
+                    'filename': combined_output_filename,
+                    'rows': len(combined_df)
+                })
+                all_dataframes = [combined_df]
+                preview_data = _extract_preview_data(output_path)
+
+            # Clean up input files
+            for filepath in valid_files:
+                try:
+                    os.remove(filepath)
+                except:
+                    pass
+            
+            # Check for missing style codes
+            missing_style_codes = []
+            cs_list = _load_client_style_list('OBU_CS.xlsx')
+            missing_style_codes = _check_missing_style_codes(all_dataframes, cs_list)
+
+            # Record processing stats
+            record_processing('OBU', len(valid_files), sum(len(df) for df in all_dataframes))
+
+            # Prepare template variables
+            success_msg = f'Successfully processed {len(valid_files)} file(s)!' if len(valid_files) > 1 else 'File processed successfully!'
+            template_vars = {
+                'success': success_msg,
+                'cs_count': _get_cs_count('OBU'),
+                'preview_data': preview_data
+            }
+
+            if process_separately or len(valid_files) == 1:
+                if len(download_urls) > 1:
+                    template_vars['download_urls'] = download_urls
+                else:
+                    template_vars['download_url'] = download_urls[0]['url']
+            else:
+                template_vars['download_url'] = url_for('download_file', filename=combined_output_filename)
+
+            if missing_style_codes:
+                template_vars['error'] = f'client style master not created for the style(s): {", ".join(missing_style_codes)}'
+
+            return render_template('index_obu.html', **template_vars)
+
+        except Exception as proc_error:
+            for fp in valid_files:
+                try:
+                    os.remove(fp)
+                except:
+                    pass
+            raise proc_error
+    except Exception as e:
+        return render_template('index_obu.html', error=f'Error processing file: {str(e)}', 
+                             cs_count=_get_cs_count('OBU'))
 
 
 @app.route('/process-rbl', methods=['POST'])
@@ -1571,6 +1814,11 @@ def process_aam():
         return process_aam_file(path, out_dir, priority_value=priority)
     
     return _handle_generic_processing(request, 'index_aam.html', _proc, 'xlsx', 'AAM')
+
+
+@app.route('/process-amp', methods=['POST'])
+def process_amp():
+    return _handle_generic_processing(request, 'index_amp.html', process_amp_file, 'xlsx', 'AMP')
 
 
 @app.route('/process-bdldhi', methods=['POST'])
@@ -1653,9 +1901,13 @@ def process_sgi():
 def process_vimco():
     order_group = (request.form.get('order_group') or '').strip()
     priority = (request.form.get('priority') or '5 day').strip()
+    is_mounting_po = (request.form.get('is_mounting_po') or 'no').strip().lower() == 'yes'
     
     def _proc(path, out_dir):
-        return process_vimco_v2_file(path, out_dir, order_group=order_group, priority=priority)
+        return process_vimco_v2_file(path, out_dir, order_group=order_group, priority=priority, is_mounting_po=is_mounting_po)
+    
+    # def _proc(path, out_dir):
+    #     return process_vimco_v2_file(path, out_dir, order_group=order_group, priority=priority)
     
     return _handle_generic_processing(request, 'index_vimco.html', _proc, 'xlsx', 'VIMCO')
 
