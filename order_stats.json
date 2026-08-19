@@ -62,12 +62,12 @@
       "last_processed": "2026-08-14 11:34"
     },
     "OMJ": {
-      "files_processed": 1,
-      "orders_processed": 2,
-      "last_processed": "2026-08-14 17:31"
+      "files_processed": 8,
+      "orders_processed": 44,
+      "last_processed": "2026-08-17 18:22"
     }
   },
-  "total_files": 681,
-  "total_orders": 5321,
-  "last_breakdown_logged_date": "2026-08-14"
+  "total_files": 688,
+  "total_orders": 5363,
+  "last_breakdown_logged_date": "2026-08-17"
 }
